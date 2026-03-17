@@ -1,0 +1,26 @@
+[project]
+name = "discorsair"
+version = "0.1.0"
+description = "Discourse automation and stream analysis CLI"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "l39" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+  "curl_cffi>=0.6.0",
+]
+
+[project.scripts]
+discorsair = "discorsair.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/discorsair"]

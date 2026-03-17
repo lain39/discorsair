@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Logs
+*.log
+
+# SQLite / data
+*.db
+*.db-shm
+*.db-wal
+/data/
+
+# OS
+.DS_Store
+
+# Local config overrides
+config/*.json

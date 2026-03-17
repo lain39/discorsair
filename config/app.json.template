@@ -1,0 +1,100 @@
+{
+  // 基础站点配置
+  "site": {
+    "base_url": "https://your-discourse.example",
+    "timeout_secs": 20
+  },
+  // 时区（用于今日统计与运行时段）
+  "time": {
+    "timezone": "Asia/Shanghai"
+  },
+
+  // 单账号配置
+  "auth": {
+    "name": "main",
+    "cookie": "_forum_session=...;",
+    "proxy": "http://127.0.0.1:7890",
+    "status": "active",
+    "disabled": false,
+    "last_ok": "",
+    "last_fail": "",
+    "last_error": "",
+    "note": ""
+  },
+
+  // 是否输出更详细日志
+  "debug": false,
+  // 日志文件路径（空表示不写文件）
+  "logging": {
+    "path": ""
+  },
+
+  // SQLite 存储
+  "storage": {
+    "path": "data/discorsair.db",
+    "auto_per_site": true,
+    "rotate_daily": false
+  },
+
+  // 是否抓取帖子内容
+  "crawl": {
+    "enabled": true
+  },
+
+  // watch 行为
+  "watch": {
+    "use_unseen": false,
+    "timings_per_topic": 30
+  },
+  // 请求队列
+  "queue": {
+    "maxsize": 0,
+    "timeout_secs": 60
+  },
+
+  // HTTP 控制服务
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "interval_secs": 30,
+    "max_posts_per_interval": 200,
+    "auto_restart": true,
+    "restart_backoff_secs": 60,
+    "max_restarts": 0,
+    "same_error_stop_threshold": 0,
+    "api_key": "",
+    "schedule": [
+      "08:00-12:00",
+      "14:00-23:00"
+    ]
+  },
+
+  // 通知配置（类似 Telegram sendMessage）
+  "notify": {
+    "enabled": false,
+    "interval_secs": 600,
+    "url": "",
+    "chat_id": "",
+    "prefix": "[Discorsair]",
+    "error_prefix": "[Discorsair][error]",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "timeout_secs": 15
+  },
+
+  // 请求参数
+  "request": {
+    "impersonate_target": "chrome110",
+    "user_agent": "",
+    "max_retries": 2,
+    "min_interval_secs": 1
+  },
+
+  // FlareSolverr
+  "flaresolverr": {
+    "enabled": true,
+    "base_url": "http://host.docker.internal:8191",
+    "request_timeout_secs": 60
+  }
+}
