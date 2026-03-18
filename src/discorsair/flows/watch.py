@@ -222,11 +222,15 @@ def _poll_notifications(client: DiscourseClient, store: SQLiteStore, notifier: N
     ids = [int(item.get("id", 0) or 0) for item in unread]
     sent = store.get_sent_notification_ids(ids)
     to_send = [item for item in unread if int(item.get("id", 0) or 0) not in sent]
+    sent_items: list[dict[str, Any]] = []
     for item in to_send:
         msg = format_notification(item)
-        notifier.send(msg)
-    store.mark_notifications_sent(to_send)
-    store.inc_stat("notifications_sent", len(to_send))
+        if notifier.send(msg):
+            sent_items.append(item)
+    if not sent_items:
+        return
+    store.mark_notifications_sent(sent_items)
+    store.inc_stat("notifications_sent", len(sent_items))
 
 
 def _sleep_interruptible(seconds: float, stop_event: Any | None) -> None:

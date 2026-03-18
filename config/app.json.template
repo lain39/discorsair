@@ -12,8 +12,10 @@
   // 单账号配置
   "auth": {
     "name": "main",
+    // 建议优先保留登录态所需的核心 cookie；运行时仅会在成功请求后写回非空 cookie
     "cookie": "_forum_session=...;",
     "proxy": "http://127.0.0.1:7890",
+    // 以下字段主要由运行时维护
     "status": "active",
     "disabled": false,
     "last_ok": "",
@@ -54,7 +56,8 @@
 
   // HTTP 控制服务
   "server": {
-    "host": "0.0.0.0",
+    // 监听非本机地址时，务必配置 api_key
+    "host": "127.0.0.1",
     "port": 8080,
     "interval_secs": 30,
     "max_posts_per_interval": 200,
@@ -85,7 +88,9 @@
 
   // 请求参数
   "request": {
-    "impersonate_target": "chrome110",
+    // 为空时优先使用 impersonate_target 对应的内置 UA
+    "impersonate_target": "",
+    // 为空时可由 FlareSolverr 通过 ua_probe_url 探测；probe 不会携带或持久化 cookie
     "user_agent": "",
     "max_retries": 2,
     "min_interval_secs": 1
@@ -95,6 +100,8 @@
   "flaresolverr": {
     "enabled": true,
     "base_url": "http://host.docker.internal:8191",
-    "request_timeout_secs": 60
+    "request_timeout_secs": 60,
+    // 可留空；为空时默认使用 data:, 仅探测 userAgent
+    "ua_probe_url": ""
   }
 }

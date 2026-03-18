@@ -17,12 +17,11 @@ def _pick_unseen_topic(latest: dict[str, Any]) -> int | None:
     return None
 
 
-def daily(client: DiscourseClient, topic_id: int | None) -> None:
+def daily(client: DiscourseClient, topic_id: int | None) -> dict[str, Any]:
     if topic_id is None:
         latest = client.get_latest()
         topic_id = _pick_unseen_topic(latest)
     if not topic_id:
-        print("no topic found")
-        return
+        return {"ok": False, "topic_id": None, "reason": "no_topic_found"}
     client.post_timings(topic_id=topic_id, timings={1: 1000}, topic_time=1000)
-    print(f"daily ok: topic_id={topic_id}")
+    return {"ok": True, "topic_id": topic_id}

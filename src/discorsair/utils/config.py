@@ -42,7 +42,7 @@ def default_app_config() -> dict[str, Any]:
         "watch": {"use_unseen": False, "timings_per_topic": 30},
         "queue": {"maxsize": 0, "timeout_secs": 60},
         "server": {
-            "host": "0.0.0.0",
+            "host": "127.0.0.1",
             "port": 8080,
             "interval_secs": 30,
             "max_posts_per_interval": 200,

@@ -149,38 +149,35 @@ class DiscourseClient:
         )
         if resp.status == 200:
             return
-        if resp.status == 403:
-            text = resp.text.strip()
-            if text == "[\"BAD CSRF\"]":
-                logging.getLogger(__name__).warning("discourse: BAD CSRF, refreshing token and retrying")
-                if _retried:
-                    raise RuntimeError("post_timings failed after CSRF retry")
-                self.get_csrf()
-                self.post_timings(topic_id, timings, topic_time, _retried=True)
-                return
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                data = {}
-            if isinstance(data, dict) and data.get("error_type") == "not_logged_in":
-                raise DiscourseAuthError("not_logged_in")
-            if isinstance(data, dict) and data.get("error_type") == "invalid_access":
-                raise DiscourseAuthError("invalid_access")
-        raise RuntimeError(f"post_timings failed: status={resp.status}")
+        text = resp.text.strip()
+        if resp.status == 403 and text == "[\"BAD CSRF\"]":
+            logging.getLogger(__name__).warning("discourse: BAD CSRF, refreshing token and retrying")
+            if _retried:
+                raise RuntimeError("post_timings failed after CSRF retry")
+            self.get_csrf()
+            self.post_timings(topic_id, timings, topic_time, _retried=True)
+            return
+        payload: Any
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = text
+        self._raise_for_error(resp.status, payload, "post_timings")
 
     def toggle_reaction(self, post_id: int, emoji: str) -> Dict[str, Any]:
         if not self._csrf_token:
             self.get_csrf()
         logging.getLogger(__name__).info("discourse: toggle_reaction post=%s emoji=%s", post_id, emoji)
-        resp = self._requester.request(
+        return self._request_json(
             "put",
             endpoints.reactions(post_id, emoji),
+            operation="toggle_reaction",
+            retry_bad_csrf=True,
             headers={
                 "X-Requested-With": "XMLHttpRequest",
                 "x-csrf-token": self._csrf_token or "",
             },
         )
-        return resp.json()
 
     def reply(self, topic_id: int, raw: str, category: Optional[int] = None) -> Dict[str, Any]:
         if not self._csrf_token:
@@ -199,9 +196,11 @@ class DiscourseClient:
         if category is not None:
             payload["category"] = str(category)
         body = urlencode(payload)
-        resp = self._requester.request(
+        return self._request_json(
             "post",
             endpoints.create_post(),
+            operation="reply",
+            retry_bad_csrf=True,
             headers={
                 "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
                 "X-Requested-With": "XMLHttpRequest",
@@ -209,13 +208,70 @@ class DiscourseClient:
             },
             data=body,
         )
-        return resp.json()
 
     def get_cookie_header(self) -> str:
         return self._requester.get_cookie_header()
 
     def last_response_ok(self) -> bool | None:
         return self._requester.last_response_ok()
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        operation: str,
+        headers: Dict[str, str],
+        params: Dict[str, str] | None = None,
+        data: str | None = None,
+        json_body: Dict[str, Any] | None = None,
+        retry_bad_csrf: bool = False,
+        _retried: bool = False,
+    ) -> Dict[str, Any]:
+        resp = self._requester.request(
+            method,
+            path,
+            headers=headers,
+            params=params,
+            data=data,
+            json_body=json_body,
+        )
+        if resp.status == 403 and retry_bad_csrf and resp.text.strip() == "[\"BAD CSRF\"]":
+            logging.getLogger(__name__).warning("discourse: %s got BAD CSRF, refreshing token and retrying", operation)
+            if _retried:
+                raise RuntimeError(f"{operation} failed after CSRF retry")
+            self.get_csrf()
+            retry_headers = dict(headers)
+            retry_headers["x-csrf-token"] = self._csrf_token or ""
+            return self._request_json(
+                method,
+                path,
+                operation=operation,
+                headers=retry_headers,
+                params=params,
+                data=data,
+                json_body=json_body,
+                retry_bad_csrf=retry_bad_csrf,
+                _retried=True,
+            )
+        try:
+            payload = resp.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{operation} failed: status={resp.status} returned non-JSON response") from exc
+        self._raise_for_error(resp.status, payload, operation)
+        return payload
+
+    def _raise_for_error(self, status: int, payload: Any, operation: str) -> None:
+        if isinstance(payload, dict):
+            error_type = payload.get("error_type")
+            if error_type in {"not_logged_in", "invalid_access"}:
+                raise DiscourseAuthError(str(error_type))
+            detail = payload.get("errors") or payload.get("message") or error_type
+        else:
+            detail = None
+        if status >= 400:
+            if detail:
+                raise RuntimeError(f"{operation} failed: status={status} detail={detail}")
+            raise RuntimeError(f"{operation} failed: status={status}")
 
 
 def _estimate_composer_timings(raw: str) -> tuple[int, int]:

@@ -13,9 +13,9 @@ import time
 
 from curl_cffi import requests
 
-from discorsair.core.cookies import cookies_to_header, merge_cookies, parse_cookie_header
+from discorsair.core.cookies import cookies_to_header, parse_cookie_header
 from discorsair.core.session import SessionState
-from discorsair.utils.ua_map import get_default_ua
+from discorsair.utils.ua_map import get_default_ua, infer_impersonate_target_from_ua
 
 _LOG = logging.getLogger(__name__)
 
@@ -42,6 +42,54 @@ _HTML_HINT_RE = re.compile(r"<\s*(html|head|title)\b", re.IGNORECASE)
 _JSON_ERR_RE = re.compile(r'"error_type"\s*:|bad csrf', re.IGNORECASE)
 _LEADING_WS_RE = re.compile(r"^\s*")
 _CF_REDIRECT_RE = re.compile(r"/cdn-cgi/|challenges\.cloudflare\.com", re.IGNORECASE)
+
+
+def _normalize_header_key(name: str) -> str:
+    return str(name).strip().lower()
+
+
+def _merge_headers(defaults: Dict[str, str], override: Optional[Dict[str, str]]) -> Dict[str, str]:
+    if not override:
+        return dict(defaults)
+    out = dict(defaults)
+    for key, value in override.items():
+        norm = _normalize_header_key(key)
+        for existing in list(out.keys()):
+            if _normalize_header_key(existing) == norm:
+                del out[existing]
+        out[key] = value
+    return out
+
+
+def _has_header(headers: Dict[str, str], name: str) -> bool:
+    target = _normalize_header_key(name)
+    return any(_normalize_header_key(key) == target for key in headers)
+
+
+def _mask_secret(value: str, *, keep_prefix: int = 8, keep_suffix: int = 6) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= keep_prefix + keep_suffix + 3:
+        return "***"
+    return f"{text[:keep_prefix]}...{text[-keep_suffix:]}"
+
+
+def _summarize_cookies(cookies: Dict[str, str]) -> Dict[str, Any]:
+    names = sorted(cookies.keys())
+    summary: Dict[str, Any] = {
+        "count": len(cookies),
+        "names": names,
+    }
+    cf_clearance = cookies.get("cf_clearance")
+    if cf_clearance:
+        summary["cf_clearance"] = _mask_secret(cf_clearance)
+    return summary
+
+
+def _redact_cookie_pairs(cookies: Dict[str, str]) -> Dict[str, str]:
+    return {name: _mask_secret(value) for name, value in cookies.items()}
+
 
 def _is_cloudflare_challenge(status: int, headers: Dict[str, str], text: str) -> bool:
     if status == 302:
@@ -96,10 +144,40 @@ def _translate_proxy_for_flaresolverr(proxy: str | None) -> str | None:
     parsed = urlparse(proxy)
     host = parsed.hostname or ""
     if host in {"127.0.0.1", "localhost", "0.0.0.0"}:
-        host = "host.docker.internal"
-        rebuilt = parsed._replace(netloc=f"{host}:{parsed.port}")
+        auth = ""
+        if parsed.username:
+            auth = parsed.username
+            if parsed.password:
+                auth += f":{parsed.password}"
+            auth += "@"
+        port = f":{parsed.port}" if parsed.port else ""
+        rebuilt = parsed._replace(netloc=f"{auth}host.docker.internal{port}")
         return rebuilt.geturl()
     return proxy
+
+
+def _normalized_port(parsed) -> int | None:
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme == "http":
+        return 80
+    if parsed.scheme == "https":
+        return 443
+    return None
+
+
+def _is_same_origin(base_url: str | None, target_url: str) -> bool:
+    if not base_url:
+        return True
+    base = urlparse(base_url)
+    target = urlparse(target_url)
+    if not base.hostname or not target.hostname:
+        return True
+    return (
+        base.scheme == target.scheme
+        and base.hostname == target.hostname
+        and _normalized_port(base) == _normalized_port(target)
+    )
 
 
 class Requester:
@@ -126,6 +204,16 @@ class Requester:
         if not self._session.cookies:
             self._session.cookies = parse_cookie_header(self._session.cookie_header)
 
+    def _default_headers(self, *, include_referer: bool = True) -> Dict[str, str]:
+        headers: Dict[str, str] = {
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        base = (self._session.base_url or "").rstrip("/")
+        if include_referer and base:
+            headers["Referer"] = base + "/"
+        return headers
+
     def _ensure_user_agent(self, ua_probe_url: str | None) -> str:
         if self._session.user_agent:
             return self._session.user_agent
@@ -135,11 +223,25 @@ class Requester:
             return default_ua
         probe_url = ua_probe_url or "data:,"
         if probe_url and self._flaresolverr_base_url:
-            solution = self._flaresolverr_request("get", probe_url, headers={})
+            solution = self._flaresolverr_request(
+                "get",
+                probe_url,
+                include_cookies=False,
+                persist_solution_cookies=False,
+            )
             ua = solution.get("userAgent", "")
             if ua:
                 self._session.user_agent = ua
                 return ua
+        return ""
+
+    def _ensure_impersonate_target(self, user_agent: str) -> str:
+        if self._session.impersonate_target:
+            return self._session.impersonate_target
+        inferred = infer_impersonate_target_from_ua(user_agent)
+        if inferred:
+            self._session.impersonate_target = inferred
+            return inferred
         return ""
 
     def request(
@@ -156,6 +258,7 @@ class Requester:
         url = path_or_url
         if not url.startswith("http"):
             url = urljoin(self._session.base_url, path_or_url)
+        same_origin = _is_same_origin(self._session.base_url, url)
 
         attempts = self._max_retries
         last_exc: Exception | None = None
@@ -165,15 +268,31 @@ class Requester:
                 self._throttle()
 
                 user_agent = self._ensure_user_agent(ua_probe_url or self._ua_probe_url)
-                req_headers = dict(headers or {})
-                if user_agent and "User-Agent" not in req_headers:
+                impersonate_target = self._ensure_impersonate_target(user_agent)
+                if self._debug and user_agent:
+                    if impersonate_target:
+                        _LOG.debug(
+                            "ua probe aligned runtime identity: user_agent=%s impersonate_target=%s",
+                            user_agent,
+                            impersonate_target,
+                        )
+                    else:
+                        _LOG.warning(
+                            "ua probe could not align impersonate target: user_agent=%s impersonate_target=%s",
+                            user_agent,
+                            self._session.impersonate_target,
+                        )
+                req_headers = _merge_headers(self._default_headers(include_referer=same_origin), headers)
+                if user_agent and not _has_header(req_headers, "User-Agent"):
                     req_headers["User-Agent"] = user_agent
 
-                cookies = dict(self._session.cookies)
-                cf_key = _proxy_key(self._session.proxy)
-                cached_cf = self._session.cf_clearance_cache.get(cf_key)
-                if cached_cf and "cf_clearance" not in cookies:
-                    cookies["cf_clearance"] = cached_cf
+                cookies: Dict[str, str] = {}
+                if same_origin:
+                    cookies = dict(self._session.cookies)
+                    cf_key = _proxy_key(self._session.proxy)
+                    cached_cf = self._session.cf_clearance_cache.get(cf_key)
+                    if cached_cf and "cf_clearance" not in cookies:
+                        cookies["cf_clearance"] = cached_cf
 
                 proxies = None
                 if self._session.proxy:
@@ -182,26 +301,22 @@ class Requester:
                 _LOG.info("request: %s %s via curl_cffi", method.upper(), url)
                 if self._debug:
                     _LOG.debug("request headers: %s", _redact_headers(req_headers))
+                    _LOG.debug("request cookies: %s", _summarize_cookies(cookies))
                     if params:
                         _LOG.debug("request params: %s", params)
                 try:
-                    resp = requests.request(
+                    response = self._perform_request(
                         method=method,
                         url=url,
                         headers=req_headers,
                         params=params,
                         data=data,
-                        json=json_body,
+                        json_body=json_body,
                         cookies=cookies,
-                        impersonate=self._session.impersonate_target,
                         proxies=proxies,
-                        timeout=self._timeout_secs,
+                        impersonate_target=impersonate_target,
+                        persist_response_cookies=same_origin,
                     )
-                    response = ResponseData(status=resp.status_code, headers=dict(resp.headers), text=resp.text)
-                    if resp.cookies:
-                        merged = dict(self._session.cookies)
-                        merged.update(resp.cookies)
-                        self._session.cookies = merged
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
                     self._session.last_response_ok = False
@@ -214,28 +329,34 @@ class Requester:
                     _LOG.debug("response headers: %s", _redact_headers(response.headers))
                     _LOG.debug("response body (first 500 chars): %s", response.text[:500])
 
-                if allow_fallback and _is_cloudflare_challenge(response.status, response.headers, response.text):
+                if allow_fallback and same_origin and _is_cloudflare_challenge(response.status, response.headers, response.text):
                     if not self._flaresolverr_base_url:
+                        self._session.last_response_ok = response.status < 400
                         return response
                     _LOG.info("challenge detected, solving via FlareSolverr and retrying")
-                    self._solve_challenge()
-                    resp = requests.request(
-                        method=method,
-                        url=url,
-                        headers=req_headers,
-                        params=params,
-                        data=data,
-                        json=json_body,
-                        cookies=self._session.cookies,
-                        impersonate=self._session.impersonate_target,
-                        proxies=proxies,
-                        timeout=self._timeout_secs,
-                    )
-                    response = ResponseData(status=resp.status_code, headers=dict(resp.headers), text=resp.text)
-                    if resp.cookies:
-                        merged = dict(self._session.cookies)
-                        merged.update(resp.cookies)
-                        self._session.cookies = merged
+                    try:
+                        self._solve_challenge()
+                        if self._debug:
+                            _LOG.debug("retry request headers: %s", _redact_headers(req_headers))
+                            _LOG.debug("retry request cookies: %s", _summarize_cookies(dict(self._session.cookies)))
+                        response = self._perform_request(
+                            method=method,
+                            url=url,
+                            headers=req_headers,
+                            params=params,
+                            data=data,
+                            json_body=json_body,
+                            cookies=dict(self._session.cookies),
+                            proxies=proxies,
+                            impersonate_target=self._session.impersonate_target,
+                            persist_response_cookies=True,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        last_exc = exc
+                        self._session.last_response_ok = False
+                        _LOG.warning("request failed after challenge solve (%s/%s): %s", attempt + 1, attempts, exc)
+                        self._backoff(attempt)
+                        continue
                     if self._debug:
                         _LOG.debug("retry status: %s", response.status)
                         _LOG.debug("retry headers: %s", _redact_headers(response.headers))
@@ -258,6 +379,40 @@ class Requester:
             if response is None:
                 raise RuntimeError("request failed without response")
             return response
+
+    def _perform_request(
+        self,
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        params: Optional[Dict[str, str]],
+        data: Optional[str],
+        json_body: Optional[Dict[str, Any]],
+        cookies: Dict[str, str],
+        proxies: Dict[str, str] | None,
+        impersonate_target: str,
+        persist_response_cookies: bool,
+    ) -> ResponseData:
+        if self._debug and cookies:
+            _LOG.debug("curl_cffi cookie header: %s", _redact_cookie_pairs(cookies))
+        resp = requests.request(
+            method=method,
+            url=url,
+            headers=headers,
+            params=params,
+            data=data,
+            json=json_body,
+            cookies=cookies,
+            impersonate=impersonate_target or None,
+            proxies=proxies,
+            timeout=self._timeout_secs,
+        )
+        response = ResponseData(status=resp.status_code, headers=dict(resp.headers), text=resp.text)
+        if persist_response_cookies and resp.cookies:
+            merged = dict(self._session.cookies)
+            merged.update(resp.cookies)
+            self._session.cookies = merged
+        return response
 
     def _backoff(self, attempt: int) -> None:
         delay = min(2 ** attempt, 10)
@@ -282,9 +437,10 @@ class Requester:
         self,
         method: str,
         url: str,
-        headers: Dict[str, str],
         params: Optional[Dict[str, str]] = None,
         data: Optional[str] = None,
+        include_cookies: bool = True,
+        persist_solution_cookies: bool = True,
     ) -> Dict[str, Any]:
         if not self._flaresolverr_base_url:
             raise RuntimeError("FlareSolverr not configured")
@@ -295,9 +451,8 @@ class Requester:
             "cmd": f"request.{method.lower()}",
             "url": url,
             "maxTimeout": int(self._flaresolverr_timeout_secs * 1000),
-            "headers": headers,
         }
-        if self._session.cookies:
+        if include_cookies and self._session.cookies:
             payload["cookies"] = [{"name": k, "value": v} for k, v in self._session.cookies.items()]
         if params:
             payload["url"] = url + "?" + urlencode(params, doseq=True)
@@ -318,6 +473,19 @@ class Requester:
             raise RuntimeError(f"FlareSolverr error: {data_json}")
 
         solution = data_json.get("solution", {})
+        if self._debug:
+            solution_cookies = {
+                item.get("name"): item.get("value")
+                for item in solution.get("cookies", [])
+                if item.get("name") and item.get("value")
+            }
+            _LOG.debug(
+                "flaresolverr solution: userAgent=%s cookies=%s",
+                solution.get("userAgent", ""),
+                _summarize_cookies(solution_cookies),
+            )
+        if not persist_solution_cookies:
+            return solution
         cookies_list = solution.get("cookies", [])
         merged = dict(self._session.cookies)
         for item in cookies_list:
@@ -336,7 +504,7 @@ class Requester:
         base = self._session.base_url
         if not base:
             raise RuntimeError("base_url is required to solve challenge")
-        self._flaresolverr_request("get", base, headers={})
+        self._flaresolverr_request("get", base)
 
 
 def _redact_headers(headers: Dict[str, Any]) -> Dict[str, Any]:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict
 
@@ -26,20 +25,25 @@ class Notifier:
         self._prefix = prefix
         self._error_prefix = error_prefix or prefix
 
-    def send(self, text: str) -> None:
+    def send(self, text: str) -> bool:
         payload = {"chat_id": self._chat_id, "text": f"{self._prefix} {text}"}
-        self._post(payload)
+        return self._post(payload)
 
-    def send_error(self, text: str) -> None:
+    def send_error(self, text: str) -> bool:
         payload = {"chat_id": self._chat_id, "text": f"{self._error_prefix} {text}"}
-        self._post(payload)
+        return self._post(payload)
 
-    def _post(self, payload: dict[str, str]) -> None:
+    def _post(self, payload: dict[str, str]) -> bool:
         try:
             resp = requests.post(self._url, headers=self._headers, json=payload, timeout=self._timeout_secs)
             logging.getLogger(__name__).info("notify: status=%s", resp.status_code)
-        except Exception as exc:  
+            if 200 <= resp.status_code < 300:
+                return True
+            logging.getLogger(__name__).warning("notify failed: status=%s body=%s", resp.status_code, resp.text[:200])
+            return False
+        except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning("notify failed: %s", exc)
+            return False
 
 
 def format_notification(item: dict[str, Any]) -> str:

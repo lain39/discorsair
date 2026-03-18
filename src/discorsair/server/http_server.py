@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 import threading
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from discorsair.discourse.queued_client import QueuedDiscourseClient
 from discorsair.flows.watch import watch
 from discorsair.storage.sqlite_store import SQLiteStore
 from discorsair.utils.notify import Notifier
+
+_UNSET = object()
 
 
 @dataclass
@@ -101,12 +104,15 @@ class WatchController:
                         timezone_name=self._timezone_name,
                     )
                     return
+                except DiscourseAuthError as exc:
+                    logging.getLogger(__name__).error("watch stopped due to auth error: %s", exc)
+                    self.report_error(str(exc), f"watch stopped: auth error: {exc}")
+                    if self._runtime.stop_event:
+                        self._runtime.stop_event.set()
+                    return
                 except Exception as exc:  # noqa: BLE001
                     logging.getLogger(__name__).error("watch thread crashed: %s", exc)
-                    self._runtime.last_error = str(exc)
-                    self._runtime.last_error_at = _now()
-                    if self._notifier:
-                        self._notifier.send_error(f"watch crashed: {exc}")
+                    self.report_error(str(exc), f"watch crashed: {exc}")
                     sig = f"{exc.__class__.__name__}:{exc}"
                     if sig == self._last_error_sig:
                         self._same_error_count += 1
@@ -142,6 +148,26 @@ class WatchController:
         logging.getLogger(__name__).info("watch started (schedule=%s)", use_schedule)
         return True
 
+    def configure(
+        self,
+        *,
+        use_unseen: bool | None = None,
+        timings_per_topic: int | None = None,
+        max_posts_per_interval: int | None | object = _UNSET,
+    ) -> dict[str, Any]:
+        if use_unseen is not None:
+            self._use_unseen = bool(use_unseen)
+        if timings_per_topic is not None:
+            self._timings_per_topic = max(1, int(timings_per_topic))
+        if max_posts_per_interval is not _UNSET:
+            self._max_posts_per_interval = None if max_posts_per_interval is None else int(max_posts_per_interval)
+        return {
+            "ok": True,
+            "use_unseen": self._use_unseen,
+            "timings_per_topic": self._timings_per_topic,
+            "max_posts_per_interval": self._max_posts_per_interval,
+        }
+
     def stop(self) -> bool:
         if not self._runtime.stop_event:
             return False
@@ -176,9 +202,36 @@ class WatchController:
         self._same_error_count = 0
         self._last_error_sig = None
 
+    def report_error(self, message: str, notify_message: str | None = None) -> None:
+        self._set_runtime_error(message)
+        if notify_message and self._notifier:
+            self._notifier.send_error(notify_message)
+
+    def _set_runtime_error(self, message: str) -> None:
+        self._runtime.last_error = message
+        self._runtime.last_error_at = _now()
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _is_loopback_host(host: str) -> bool:
+    value = (host or "").strip()
+    if value in {"localhost", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_server_binding(host: str, api_key: str | None) -> None:
+    if _is_loopback_host(host):
+        return
+    if api_key:
+        return
+    raise ValueError("server.api_key is required when binding HTTP control server to a non-loopback host")
 
 
 def _next_run_local(windows: list[str], timezone_name: str) -> str | None:
@@ -270,10 +323,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._send(504, {"error": "timeout"})
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).error("http GET error: %s", exc)
-            self.server.watch_controller._runtime.last_error = str(exc)
-            self.server.watch_controller._runtime.last_error_at = _now()
-            if self.server.watch_controller._notifier:
-                self.server.watch_controller._notifier.send_error(f"http GET error: {exc}")
+            self.server.watch_controller.report_error(str(exc), f"http GET error: {exc}")
             self._send(500, {"error": "internal"})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -288,21 +338,16 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/watch/config":
                 data = self._json()
-                if "use_unseen" in data:
-                    self.server.watch_controller._use_unseen = bool(data.get("use_unseen"))
-                if "timings_per_topic" in data:
-                    self.server.watch_controller._timings_per_topic = max(1, int(data.get("timings_per_topic")))
+                max_posts_per_interval = _UNSET
                 if "max_posts_per_interval" in data:
-                    val = data.get("max_posts_per_interval")
-                    self.server.watch_controller._max_posts_per_interval = int(val) if val is not None else None
+                    max_posts_per_interval = data.get("max_posts_per_interval")
                 self._send(
                     200,
-                    {
-                        "ok": True,
-                        "use_unseen": self.server.watch_controller._use_unseen,
-                        "timings_per_topic": self.server.watch_controller._timings_per_topic,
-                        "max_posts_per_interval": self.server.watch_controller._max_posts_per_interval,
-                    },
+                    self.server.watch_controller.configure(
+                        use_unseen=data.get("use_unseen") if "use_unseen" in data else None,
+                        timings_per_topic=data.get("timings_per_topic") if "timings_per_topic" in data else None,
+                        max_posts_per_interval=max_posts_per_interval,
+                    ),
                 )
                 return
             if self.path == "/watch/stop":
@@ -333,25 +378,16 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
         except TimeoutError:
             logging.getLogger(__name__).warning("http POST timeout")
-            self.server.watch_controller._runtime.last_error = "timeout"
-            self.server.watch_controller._runtime.last_error_at = _now()
-            if self.server.watch_controller._notifier:
-                self.server.watch_controller._notifier.send_error("http POST timeout")
+            self.server.watch_controller.report_error("timeout", "http POST timeout")
             self._send(504, {"error": "timeout"})
         except DiscourseAuthError as exc:
             logging.getLogger(__name__).error("http auth error: %s", exc)
-            self.server.watch_controller._runtime.last_error = str(exc)
-            self.server.watch_controller._runtime.last_error_at = _now()
-            if self.server.watch_controller._notifier:
-                self.server.watch_controller._notifier.send_error(f"http auth error: {exc}")
+            self.server.watch_controller.report_error(str(exc), f"http auth error: {exc}")
             self._send(401, {"error": "not_logged_in"})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).error("http POST error: %s", exc)
-            self.server.watch_controller._runtime.last_error = str(exc)
-            self.server.watch_controller._runtime.last_error_at = _now()
-            if self.server.watch_controller._notifier:
-                self.server.watch_controller._notifier.send_error(f"http POST error: {exc}")
+            self.server.watch_controller.report_error(str(exc), f"http POST error: {exc}")
             self._send(500, {"error": "internal"})
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -380,6 +416,7 @@ def serve(
     watch_controller: WatchController,
     api_key: str | None = None,
 ) -> None:
+    validate_server_binding(host, api_key)
     httpd = ControlServer((host, port), ControlHandler, client, watch_controller, api_key=api_key)
     logging.getLogger(__name__).info("server listening on %s:%s", host, port)
     httpd.serve_forever()
