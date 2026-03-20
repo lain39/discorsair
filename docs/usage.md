@@ -19,7 +19,7 @@
 - `request.user_agent` 为空时，优先使用 `impersonate_target` 对应的内置 UA；若没有映射且启用了 FlareSolverr，则会通过 `ua_probe_url`（默认 `data:,`）获取
 - `request.impersonate_target` 指定 `curl_cffi` impersonate 目标；留空时使用默认值
 - UA 探测只用于获取 `userAgent`，不会携带当前站点 cookie，也不会把 probe 返回的 cookie 写回账号状态
-- `request.max_retries` 请求失败后的最大尝试次数
+- `request.max_retries` 请求失败后的额外重试次数；`0` 表示无限重试。默认值为 `1`，与旧版默认实际行为一致
 - `flaresolverr.ua_probe_url` 可省略，不填时默认使用 `data:,`
 - `storage.path` 指定 SQLite 存储路径（默认 `data/discorsair.db`）
 - `storage.auto_per_site` 按站点自动区分数据库文件

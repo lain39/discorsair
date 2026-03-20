@@ -95,7 +95,7 @@ def build_client(app_config: dict[str, Any]) -> DiscourseClient:
         ua_probe_url=flaresolverr.get("ua_probe_url"),
         debug=bool(app_config.get("debug", False)),
         min_interval_secs=float(req_cfg.get("min_interval_secs", 0)),
-        max_retries=int(req_cfg.get("max_retries", 2)),
+        max_retries=int(req_cfg.get("max_retries", 1)),
         timeout_secs=float(site.get("timeout_secs", 30)),
     )
     return DiscourseClient(requester)

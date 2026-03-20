@@ -63,7 +63,7 @@ def default_app_config() -> dict[str, Any]:
             "headers": {"Content-Type": "application/json"},
             "timeout_secs": 15,
         },
-        "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 2, "min_interval_secs": 1},
+        "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 1, "min_interval_secs": 1},
         "flaresolverr": {
             "enabled": True,
             "base_url": "http://host.docker.internal:8191",

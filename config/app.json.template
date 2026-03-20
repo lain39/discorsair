@@ -93,7 +93,8 @@
     "impersonate_target": "",
     // 为空时可由 FlareSolverr 通过 ua_probe_url 探测；probe 不会携带或持久化 cookie
     "user_agent": "",
-    "max_retries": 2,
+    // 失败后的额外重试次数；0 表示无限重试。默认 1 的实际行为与旧版默认值一致
+    "max_retries": 1,
     "min_interval_secs": 1
   },
 

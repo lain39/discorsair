@@ -17,11 +17,23 @@ sys.modules.setdefault("curl_cffi", types.SimpleNamespace(requests=fake_requests
 sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
-from discorsair.core.requester import Requester, _build_flaresolverr_proxy, _translate_proxy_for_flaresolverr
+from discorsair.core.requester import Requester, _build_flaresolverr_proxy, _retry_delay_secs, _translate_proxy_for_flaresolverr
 from discorsair.core.session import SessionState
 
 
 class RequesterTests(unittest.TestCase):
+    def test_retry_delay_grows_with_attempts(self) -> None:
+        self.assertEqual(_retry_delay_secs(0), 1)
+        self.assertEqual(_retry_delay_secs(1), 2)
+        self.assertEqual(_retry_delay_secs(2), 4)
+        self.assertEqual(_retry_delay_secs(3), 8)
+        self.assertEqual(_retry_delay_secs(4), 16)
+
+    def test_retry_delay_caps_at_longer_ceiling(self) -> None:
+        self.assertEqual(_retry_delay_secs(8), 256)
+        self.assertEqual(_retry_delay_secs(9), 300)
+        self.assertEqual(_retry_delay_secs(12), 300)
+
     def test_translate_proxy_rewrites_loopback_without_auth(self) -> None:
         proxy = "http://user:pass@127.0.0.1:7890"
         self.assertEqual(
@@ -164,6 +176,68 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(calls.count("https://forum.example/latest.json"), 3)
         solve.assert_called_once()
         backoff.assert_called_once()
+
+    def test_max_retries_counts_additional_retries(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url=None,
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            max_retries=1,
+        )
+
+        class DummyResponse:
+            def __init__(self, status_code: int) -> None:
+                self.status_code = status_code
+                self.text = "{\"ok\":false}"
+                self.headers = {"Content-Type": "application/json"}
+                self.cookies = {}
+
+        responses = [DummyResponse(500), DummyResponse(200)]
+
+        with patch("discorsair.core.requester.requests.request", side_effect=responses) as request_call:
+            with patch.object(requester, "_backoff") as backoff:
+                response = requester.request("get", "/latest.json", allow_fallback=False)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(request_call.call_count, 2)
+        backoff.assert_called_once()
+
+    def test_max_retries_zero_retries_until_success(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url=None,
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            max_retries=0,
+        )
+
+        class DummyResponse:
+            def __init__(self, status_code: int) -> None:
+                self.status_code = status_code
+                self.text = "{\"ok\":true}"
+                self.headers = {"Content-Type": "application/json"}
+                self.cookies = {}
+
+        responses = [RuntimeError("network-1"), RuntimeError("network-2"), DummyResponse(200)]
+
+        with patch("discorsair.core.requester.requests.request", side_effect=responses) as request_call:
+            with patch.object(requester, "_backoff") as backoff:
+                response = requester.request("get", "/latest.json", allow_fallback=False)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(request_call.call_count, 3)
+        self.assertEqual(backoff.call_count, 2)
 
     def test_cross_origin_request_does_not_send_or_persist_site_cookies(self) -> None:
         requester = Requester(

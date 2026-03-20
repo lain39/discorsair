@@ -42,6 +42,7 @@ _HTML_HINT_RE = re.compile(r"<\s*(html|head|title)\b", re.IGNORECASE)
 _JSON_ERR_RE = re.compile(r'"error_type"\s*:|bad csrf', re.IGNORECASE)
 _LEADING_WS_RE = re.compile(r"^\s*")
 _CF_REDIRECT_RE = re.compile(r"/cdn-cgi/|challenges\.cloudflare\.com", re.IGNORECASE)
+_MAX_RETRY_DELAY_SECS = 300
 
 
 def _normalize_header_key(name: str) -> str:
@@ -198,7 +199,7 @@ class Requester:
         ua_probe_url: str | None,
         debug: bool = False,
         min_interval_secs: float = 0.0,
-        max_retries: int = 2,
+        max_retries: int = 1,
         timeout_secs: float = 30,
     ):
         self._session = session
@@ -207,7 +208,7 @@ class Requester:
         self._ua_probe_url = ua_probe_url
         self._debug = debug
         self._min_interval_secs = max(float(min_interval_secs), 0.0)
-        self._max_retries = max(int(max_retries), 1)
+        self._max_retries = max(int(max_retries), 0)
         self._timeout_secs = max(float(timeout_secs), 1.0)
         self._lock = threading.Lock()
         if not self._session.cookies:
@@ -269,11 +270,10 @@ class Requester:
             url = urljoin(self._session.base_url, path_or_url)
         same_origin = _is_same_origin(self._session.base_url, url)
 
-        attempts = self._max_retries
-        last_exc: Exception | None = None
         response: ResponseData | None = None
         with self._lock:
-            for attempt in range(attempts):
+            attempt = 0
+            while True:
                 self._throttle()
 
                 user_agent = self._ensure_user_agent(ua_probe_url or self._ua_probe_url)
@@ -327,10 +327,12 @@ class Requester:
                         persist_response_cookies=same_origin,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
                     self._session.last_response_ok = False
-                    _LOG.warning("request failed (%s/%s): %s", attempt + 1, attempts, exc)
+                    if not self._can_retry(attempt):
+                        raise
+                    _LOG.warning("request failed (%s/%s): %s", attempt + 1, self._attempt_limit_label(), exc)
                     self._backoff(attempt)
+                    attempt += 1
                     continue
 
                 if self._debug:
@@ -361,33 +363,58 @@ class Requester:
                             persist_response_cookies=True,
                         )
                     except Exception as exc:  # noqa: BLE001
-                        last_exc = exc
                         self._session.last_response_ok = False
-                        _LOG.warning("request failed after challenge solve (%s/%s): %s", attempt + 1, attempts, exc)
+                        if not self._can_retry(attempt):
+                            raise
+                        _LOG.warning(
+                            "request failed after challenge solve (%s/%s): %s",
+                            attempt + 1,
+                            self._attempt_limit_label(),
+                            exc,
+                        )
                         self._backoff(attempt)
+                        attempt += 1
                         continue
                     if self._debug:
                         _LOG.debug("retry status: %s", response.status)
                         _LOG.debug("retry headers: %s", _redact_headers(response.headers))
                         _LOG.debug("retry body (first 500 chars): %s", response.text[:500])
                     if _is_cloudflare_challenge(response.status, response.headers, response.text):
+                        self._session.last_response_ok = False
+                        if not self._can_retry(attempt):
+                            return response
                         _LOG.warning("challenge still present after solve")
                         self._backoff(attempt)
+                        attempt += 1
                         continue
 
                 if response.status >= 500 or response.status == 429:
-                    _LOG.warning("retryable status (%s/%s): %s", attempt + 1, attempts, response.status)
                     self._session.last_response_ok = False
+                    if not self._can_retry(attempt):
+                        return response
+                    _LOG.warning(
+                        "retryable status (%s/%s): %s",
+                        attempt + 1,
+                        self._attempt_limit_label(),
+                        response.status,
+                    )
                     self._backoff(attempt)
+                    attempt += 1
                     continue
                 self._session.last_response_ok = response.status < 400
                 return response
 
-            if last_exc:
-                raise last_exc
             if response is None:
                 raise RuntimeError("request failed without response")
             return response
+
+    def _can_retry(self, attempt: int) -> bool:
+        return self._max_retries == 0 or attempt < self._max_retries
+
+    def _attempt_limit_label(self) -> str:
+        if self._max_retries == 0:
+            return "unlimited"
+        return str(self._max_retries + 1)
 
     def _perform_request(
         self,
@@ -424,7 +451,8 @@ class Requester:
         return response
 
     def _backoff(self, attempt: int) -> None:
-        delay = min(2 ** attempt, 10)
+        delay = _retry_delay_secs(attempt)
+        _LOG.info("retry backoff: sleeping %ss before next attempt", delay)
         time.sleep(delay)
 
     def get_cookie_header(self) -> str:
@@ -525,3 +553,8 @@ def _redact_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
         else:
             redacted[key] = value
     return redacted
+
+
+def _retry_delay_secs(attempt: int) -> int:
+    safe_attempt = max(int(attempt), 0)
+    return min(2 ** safe_attempt, _MAX_RETRY_DELAY_SECS)
