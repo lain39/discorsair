@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from discorsair.core.cookies import cookies_to_header, parse_cookie_header
 from discorsair.discourse.client import DiscourseClient
 
 
@@ -37,7 +38,7 @@ class RuntimeStateStore:
     def save_cookies(self, client: DiscourseClient) -> None:
         if client.last_response_ok() is not True:
             return
-        cookie_header = client.get_cookie_header().strip()
+        cookie_header = _persistent_cookie_header(client.get_cookie_header())
         if not cookie_header:
             return
         auth = self._app_config.get("auth", {})
@@ -55,3 +56,11 @@ class RuntimeStateStore:
             Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning("failed to save config: %s", exc)
+
+
+def _persistent_cookie_header(cookie_header: str) -> str:
+    cookies = parse_cookie_header(cookie_header.strip())
+    token = cookies.get("_t", "").strip()
+    if not token:
+        return ""
+    return cookies_to_header({"_t": token})

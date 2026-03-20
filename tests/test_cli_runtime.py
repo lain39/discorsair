@@ -72,24 +72,28 @@ class CliRuntimeTests(unittest.TestCase):
             self.assertEqual(config["auth"]["cookie"], "old")
             self.assertFalse(config_path.exists())
 
-            state.save_cookies(_Client(ok=True, cookie="new-cookie"))
+            state.save_cookies(_Client(ok=True, cookie="_t=new-token; cf_clearance=abc; session=xyz"))
 
-            self.assertEqual(config["auth"]["cookie"], "new-cookie")
+            self.assertEqual(config["auth"]["cookie"], "_t=new-token")
             saved = json.loads(config_path.read_text(encoding="utf-8"))
-            self.assertEqual(saved["auth"]["cookie"], "new-cookie")
+            self.assertEqual(saved["auth"]["cookie"], "_t=new-token")
 
     def test_state_store_does_not_overwrite_cookie_with_empty_or_same_value(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "app.json"
-            config = {"_path": str(config_path), "auth": {"cookie": "old-cookie"}}
+            config = {"_path": str(config_path), "auth": {"cookie": "_t=old-cookie"}}
             state = RuntimeStateStore(config)
 
             state.save_cookies(_Client(ok=True, cookie=""))
-            self.assertEqual(config["auth"]["cookie"], "old-cookie")
+            self.assertEqual(config["auth"]["cookie"], "_t=old-cookie")
             self.assertFalse(config_path.exists())
 
-            state.save_cookies(_Client(ok=True, cookie="old-cookie"))
-            self.assertEqual(config["auth"]["cookie"], "old-cookie")
+            state.save_cookies(_Client(ok=True, cookie="cf_clearance=abc"))
+            self.assertEqual(config["auth"]["cookie"], "_t=old-cookie")
+            self.assertFalse(config_path.exists())
+
+            state.save_cookies(_Client(ok=True, cookie="_t=old-cookie; cf_clearance=abc"))
+            self.assertEqual(config["auth"]["cookie"], "_t=old-cookie")
             self.assertFalse(config_path.exists())
 
     def test_main_renders_runtime_payload_and_accepts_config_after_subcommand(self) -> None:

@@ -12,8 +12,9 @@
   // 单账号配置
   "auth": {
     "name": "main",
-    // 建议优先保留登录态所需的核心 cookie；运行时仅会在成功请求后写回非空 cookie
-    "cookie": "_forum_session=...;",
+    // 配置中建议只保留 _t；运行时也只会把最新 _t 写回配置
+    "cookie": "_t=...",
+    // 认证代理请使用 URL 编码后的形式，例如 http://user:pa%26ss@127.0.0.1:7890
     "proxy": "http://127.0.0.1:7890",
     // 以下字段主要由运行时维护
     "status": "active",

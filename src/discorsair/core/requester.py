@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 import threading
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import unquote, urlencode, urljoin, urlparse
 import time
 
 from curl_cffi import requests
@@ -143,17 +143,26 @@ def _translate_proxy_for_flaresolverr(proxy: str | None) -> str | None:
         return None
     parsed = urlparse(proxy)
     host = parsed.hostname or ""
-    if host in {"127.0.0.1", "localhost", "0.0.0.0"}:
-        auth = ""
-        if parsed.username:
-            auth = parsed.username
-            if parsed.password:
-                auth += f":{parsed.password}"
-            auth += "@"
-        port = f":{parsed.port}" if parsed.port else ""
-        rebuilt = parsed._replace(netloc=f"{auth}host.docker.internal{port}")
-        return rebuilt.geturl()
-    return proxy
+    translated_host = "host.docker.internal" if host in {"127.0.0.1", "localhost", "0.0.0.0"} else host
+    if not translated_host:
+        return proxy
+    port = f":{parsed.port}" if parsed.port else ""
+    rebuilt = parsed._replace(netloc=f"{translated_host}{port}")
+    return rebuilt.geturl()
+
+
+def _build_flaresolverr_proxy(proxy: str | None) -> Dict[str, str] | None:
+    translated_url = _translate_proxy_for_flaresolverr(proxy)
+    if not translated_url:
+        return None
+
+    parsed = urlparse(proxy)
+    payload = {"url": translated_url}
+    if parsed.username:
+        payload["username"] = unquote(parsed.username)
+    if parsed.password:
+        payload["password"] = unquote(parsed.password)
+    return payload
 
 
 def _normalized_port(parsed) -> int | None:
@@ -445,7 +454,7 @@ class Requester:
         if not self._flaresolverr_base_url:
             raise RuntimeError("FlareSolverr not configured")
 
-        flaresolverr_proxy = _translate_proxy_for_flaresolverr(self._session.proxy)
+        flaresolverr_proxy = _build_flaresolverr_proxy(self._session.proxy)
 
         payload: Dict[str, Any] = {
             "cmd": f"request.{method.lower()}",

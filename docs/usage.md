@@ -11,7 +11,7 @@
 - `config/app.json.template` 作为模板参考
 - `site.base_url` 站点根地址（必填）
 - `site.timeout_secs` 单次请求超时（秒）
-- `auth.cookie` 登录 cookie（必填）
+- `auth.cookie` 登录 cookie（必填），配置中建议只保存 `_t=...`
 - `auth.proxy` 可设置代理（可留空）
 - `auth.name` 账号标识（用于通知前缀）
 - `auth.disabled=true` 时会阻止当前账号启动
@@ -61,9 +61,10 @@
 - `flaresolverr.request_timeout_secs` FlareSolverr 请求超时
 - 需提前在 Docker 中部署 FlareSolverr
 - 如果 `auth.proxy` 使用回环地址（如 `http://127.0.0.1:7890`），传给 FlareSolverr 的代理需要转换为 `http://host.docker.internal:7890`
+- 如果 `auth.proxy` 包含认证信息，配置里应保持 URL 编码形式；`curl_cffi` 直接使用该 URL，FlareSolverr 会改为 `{"url","username","password"}` 结构并对账号密码做 URL 解码后再发送
 - 该转换由 `src/core/` 处理
 - `cf_clearance` 可按代理 IP 做本地缓存，下次同 IP 先尝试复用
-- 运行时仅在成功请求后才会把最新 cookie 写回 `auth.cookie`；空 cookie 或未变化的 cookie 不会覆盖配置
+- 运行时仅在成功请求后才会把最新 `_t` 写回 `auth.cookie`；其他 cookie 不会持久化到配置，空 `_t` 或未变化的值也不会覆盖配置
 
 ## CLI
 

@@ -17,16 +17,27 @@ sys.modules.setdefault("curl_cffi", types.SimpleNamespace(requests=fake_requests
 sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
-from discorsair.core.requester import Requester, _translate_proxy_for_flaresolverr
+from discorsair.core.requester import Requester, _build_flaresolverr_proxy, _translate_proxy_for_flaresolverr
 from discorsair.core.session import SessionState
 
 
 class RequesterTests(unittest.TestCase):
-    def test_translate_proxy_preserves_auth(self) -> None:
+    def test_translate_proxy_rewrites_loopback_without_auth(self) -> None:
         proxy = "http://user:pass@127.0.0.1:7890"
         self.assertEqual(
             _translate_proxy_for_flaresolverr(proxy),
-            "http://user:pass@host.docker.internal:7890",
+            "http://host.docker.internal:7890",
+        )
+
+    def test_build_flaresolverr_proxy_decodes_auth(self) -> None:
+        proxy = "http://proxy.user:p%40ss%26word@127.0.0.1:5352"
+        self.assertEqual(
+            _build_flaresolverr_proxy(proxy),
+            {
+                "url": "http://host.docker.internal:5352",
+                "username": "proxy.user",
+                "password": "p@ss&word",
+            },
         )
 
     def test_ensure_user_agent_probe_does_not_send_cookies(self) -> None:
@@ -185,6 +196,37 @@ class RequesterTests(unittest.TestCase):
         self.assertNotIn("Referer", kwargs["headers"])
         self.assertNotIn("external_cookie", requester._session.cookies)
         self.assertEqual(requester._session.cookies["cf_clearance"], "abc")
+
+    def test_flaresolverr_request_uses_structured_proxy_payload(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+                proxy="http://proxy.user:p%40ss%26word@127.0.0.1:5352",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+        )
+
+        class DummyFsResponse:
+            def json(self) -> dict[str, object]:
+                return {"status": "ok", "solution": {"cookies": []}}
+
+        with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()) as post:
+            requester._flaresolverr_request("get", "https://forum.example/latest.json")
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(
+            payload["proxy"],
+            {
+                "url": "http://host.docker.internal:5352",
+                "username": "proxy.user",
+                "password": "p@ss&word",
+            },
+        )
 
 
 if __name__ == "__main__":
