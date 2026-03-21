@@ -30,6 +30,10 @@ from discorsair.core.requester import (
 from discorsair.core.session import SessionState
 from discorsair.discourse.client import DiscourseAuthError
 
+_FAKE_PROXY_URL = "http://proxy.user:p%40ss%26word@127.0.0.1:5352"
+_FAKE_PROXY_USERNAME = "proxy.user"
+_FAKE_PROXY_PASSWORD = "p@ss&word"
+
 
 class _HttpResponse:
     def __init__(self, status_code: int, text: str, headers: dict[str, str] | None = None, cookies: dict[str, str] | None = None) -> None:
@@ -104,13 +108,12 @@ class RequesterTests(unittest.TestCase):
         )
 
     def test_build_flaresolverr_proxy_decodes_auth(self) -> None:
-        proxy = "http://proxy.user:p%40ss%26word@127.0.0.1:5352"
         self.assertEqual(
-            _build_flaresolverr_proxy(proxy),
+            _build_flaresolverr_proxy(_FAKE_PROXY_URL),
             {
                 "url": "http://host.docker.internal:5352",
-                "username": "proxy.user",
-                "password": "p@ss&word",
+                "username": _FAKE_PROXY_USERNAME,
+                "password": _FAKE_PROXY_PASSWORD,
             },
         )
 
@@ -122,13 +125,12 @@ class RequesterTests(unittest.TestCase):
         )
 
     def test_build_flaresolverr_proxy_keeps_loopback_when_not_in_docker(self) -> None:
-        proxy = "http://proxy.user:p%40ss%26word@127.0.0.1:5352"
         self.assertEqual(
-            _build_flaresolverr_proxy_with_mode(proxy, running_in_docker=False),
+            _build_flaresolverr_proxy_with_mode(_FAKE_PROXY_URL, running_in_docker=False),
             {
                 "url": "http://127.0.0.1:5352",
-                "username": "proxy.user",
-                "password": "p@ss&word",
+                "username": _FAKE_PROXY_USERNAME,
+                "password": _FAKE_PROXY_PASSWORD,
             },
         )
 
@@ -326,7 +328,7 @@ class RequesterTests(unittest.TestCase):
 
     def test_flaresolverr_request_uses_structured_proxy_payload(self) -> None:
         requester = self._build_requester(
-            proxy="http://proxy.user:p%40ss%26word@127.0.0.1:5352",
+            proxy=_FAKE_PROXY_URL,
             flaresolverr_base_url="http://flaresolverr:8191",
         )
 
@@ -342,14 +344,14 @@ class RequesterTests(unittest.TestCase):
             payload["proxy"],
             {
                 "url": "http://host.docker.internal:5352",
-                "username": "proxy.user",
-                "password": "p@ss&word",
+                "username": _FAKE_PROXY_USERNAME,
+                "password": _FAKE_PROXY_PASSWORD,
             },
         )
 
     def test_flaresolverr_request_keeps_loopback_proxy_when_not_in_docker(self) -> None:
         requester = self._build_requester(
-            proxy="http://proxy.user:p%40ss%26word@127.0.0.1:5352",
+            proxy=_FAKE_PROXY_URL,
             flaresolverr_base_url="http://flaresolverr:8191",
             flaresolverr_in_docker=False,
         )
@@ -366,8 +368,8 @@ class RequesterTests(unittest.TestCase):
             payload["proxy"],
             {
                 "url": "http://127.0.0.1:5352",
-                "username": "proxy.user",
-                "password": "p@ss&word",
+                "username": _FAKE_PROXY_USERNAME,
+                "password": _FAKE_PROXY_PASSWORD,
             },
         )
 
