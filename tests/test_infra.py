@@ -26,8 +26,9 @@ sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
 from discorsair.core.request_queue import RequestQueue
-from discorsair.core.requester import ChallengeUnresolvedError
+from discorsair.core.requester import ChallengeUnresolvedError, RateLimitedError
 from discorsair.discourse.client import DiscourseAuthError
+from discorsair.discourse.queued_client import QueuedDiscourseClient
 from discorsair.server.http_server import ControlHandler, ControlServer, serve
 from discorsair.storage.sqlite_store import SQLiteStore
 
@@ -54,25 +55,290 @@ class RequestQueueTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             pending.result(timeout=1)
 
-    def test_expired_deadline_returns_timeout(self) -> None:
+    def test_rate_limited_task_is_rescheduled_without_blocking_other_keys(self) -> None:
         queue = RequestQueue()
-        started = threading.Event()
-        release = threading.Event()
+        calls: list[str] = []
+        rate_limited_once = threading.Event()
 
-        def blocking() -> None:
-            started.set()
-            release.wait(timeout=2)
+        def rate_limited() -> str:
+            calls.append("rate_limited")
+            if not rate_limited_once.is_set():
+                rate_limited_once.set()
+                raise RateLimitedError(0.05, detail="topics")
+            return "retried"
 
-        queue.submit(blocking)
-        self.assertTrue(started.wait(timeout=1))
-        expired = queue.submit(lambda: "late", deadline=time.monotonic() - 1)
+        def other() -> str:
+            calls.append("other")
+            return "other"
 
-        release.set()
+        first = queue.submit(rate_limited, rate_limit_key="get_latest")
+        second = queue.submit(other, rate_limit_key="reply")
 
-        with self.assertRaises(TimeoutError):
-            expired.result(timeout=1)
+        self.assertEqual(second.result(timeout=1), "other")
+        self.assertEqual(first.result(timeout=1), "retried")
+        self.assertEqual(calls, ["rate_limited", "other", "rate_limited"])
         queue.stop()
 
+    def test_same_rate_limit_key_waits_for_cooldown_before_running_again(self) -> None:
+        queue = RequestQueue()
+        calls: list[str] = []
+        rate_limited_once = threading.Event()
+
+        def first_call() -> str:
+            calls.append("first")
+            if not rate_limited_once.is_set():
+                rate_limited_once.set()
+                raise RateLimitedError(0.05, detail="notifications")
+            return "first-retried"
+
+        def second_call() -> str:
+            calls.append("second")
+            return "second-ok"
+
+        first = queue.submit(first_call, rate_limit_key="get_notifications")
+        second = queue.submit(second_call, rate_limit_key="get_notifications")
+
+        self.assertEqual(first.result(timeout=1), "first-retried")
+        self.assertEqual(second.result(timeout=1), "second-ok")
+        self.assertEqual(calls, ["first", "first", "second"])
+        queue.stop()
+
+    def test_rate_limited_retry_is_not_dropped_when_running_task_occupies_maxsize(self) -> None:
+        queue = RequestQueue(maxsize=1)
+        calls: list[str] = []
+        first_started = threading.Event()
+        allow_retry = threading.Event()
+        rate_limited_once = threading.Event()
+
+        def rate_limited() -> str:
+            calls.append("first")
+            if not rate_limited_once.is_set():
+                rate_limited_once.set()
+                first_started.set()
+                allow_retry.wait(timeout=1)
+                raise RateLimitedError(0.05, detail="latest")
+            return "first-retried"
+
+        first = queue.submit(rate_limited, rate_limit_key="get_latest")
+        self.assertTrue(first_started.wait(timeout=1))
+        allow_retry.set()
+
+        self.assertEqual(first.result(timeout=1), "first-retried")
+        self.assertEqual(calls, ["first", "first"])
+        queue.stop()
+
+    def test_delayed_rate_limited_task_does_not_block_other_key_when_queue_is_idle(self) -> None:
+        queue = RequestQueue(maxsize=1)
+        calls: list[str] = []
+        delayed = threading.Event()
+
+        def rate_limited() -> str:
+            calls.append("first")
+            if not delayed.is_set():
+                delayed.set()
+                raise RateLimitedError(0.15, detail="latest")
+            return "first-retried"
+
+        def other() -> str:
+            calls.append("other")
+            return "other"
+
+        first = queue.submit(rate_limited, rate_limit_key="get_latest")
+        self.assertTrue(delayed.wait(timeout=1))
+
+        second = queue.submit(other, rate_limit_key="reply")
+
+        self.assertEqual(second.result(timeout=1), "other")
+        self.assertEqual(first.result(timeout=1), "first-retried")
+        self.assertEqual(calls, ["first", "other", "first"])
+        queue.stop()
+
+    def test_delayed_rate_limited_task_does_not_fail_queue_full_while_other_task_is_running(self) -> None:
+        queue = RequestQueue(maxsize=1)
+        running_started = threading.Event()
+        release_running = threading.Event()
+
+        def running() -> str:
+            running_started.set()
+            release_running.wait(timeout=1)
+            return "running-done"
+
+        running_future = queue.submit(running, rate_limit_key="reply")
+        self.assertTrue(running_started.wait(timeout=1))
+        queue._cooldowns["get_latest"] = time.monotonic() + 0.15
+
+        first = queue.submit(lambda: "rate-limited-done", rate_limit_key="get_latest")
+
+        release_running.set()
+        self.assertEqual(running_future.result(timeout=1), "running-done")
+        self.assertEqual(first.result(timeout=1), "rate-limited-done")
+        queue.stop()
+
+    def test_new_same_key_request_waits_for_existing_cooldown(self) -> None:
+        queue = RequestQueue()
+        first_finished = threading.Event()
+
+        class _Inner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get_latest(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RateLimitedError(0.15, detail="topics")
+                first_finished.set()
+                return {"call": self.calls}
+
+        inner = _Inner()
+        client = QueuedDiscourseClient(inner, queue)
+        results: list[dict[str, int]] = []
+        errors: list[Exception] = []
+
+        def run_first() -> None:
+            try:
+                results.append(client.get_latest())
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        first_thread = threading.Thread(target=run_first, daemon=True)
+        first_thread.start()
+        time.sleep(0.02)
+
+        second_result = client.get_latest()
+
+        first_thread.join(timeout=1)
+        queue.stop()
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(errors)
+        self.assertTrue(first_finished.is_set())
+        self.assertEqual(results, [{"call": 2}])
+        self.assertEqual(second_result, {"call": 3})
+
+    def test_same_key_request_waits_for_extended_cooldown(self) -> None:
+        queue = RequestQueue()
+        first_finished = threading.Event()
+        second_attempt_ready = threading.Event()
+
+        class _Inner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get_latest(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RateLimitedError(0.05, detail="topics-1")
+                if self.calls == 2:
+                    second_attempt_ready.set()
+                    raise RateLimitedError(0.15, detail="topics-2")
+                first_finished.set()
+                return {"call": self.calls}
+
+        inner = _Inner()
+        client = QueuedDiscourseClient(inner, queue)
+        results: list[dict[str, int]] = []
+        errors: list[Exception] = []
+
+        def run_first() -> None:
+            try:
+                results.append(client.get_latest())
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        first_thread = threading.Thread(target=run_first, daemon=True)
+        first_thread.start()
+        self.assertTrue(second_attempt_ready.wait(timeout=1))
+
+        second_result = client.get_latest()
+
+        first_thread.join(timeout=1)
+        queue.stop()
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(errors)
+        self.assertTrue(first_finished.is_set())
+        self.assertEqual(results, [{"call": 3}])
+        self.assertEqual(second_result, {"call": 4})
+
+    def test_queued_client_propagates_completed_timeout_error(self) -> None:
+        queue = RequestQueue()
+
+        class _Inner:
+            def get_latest(self):
+                raise TimeoutError("upstream timeout")
+
+        client = QueuedDiscourseClient(_Inner(), queue)
+        errors: list[Exception] = []
+
+        def run() -> None:
+            try:
+                client.get_latest()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=1)
+        queue.stop()
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], TimeoutError)
+        self.assertEqual(str(errors[0]), "upstream timeout")
+
+    def test_queued_client_optional_timeout_returns_timeout_and_cancels_pending_future(self) -> None:
+        queue = RequestQueue()
+        release = threading.Event()
+
+        class _Inner:
+            def toggle_reaction(self, post_id: int, emoji: str):
+                release.wait(timeout=1)
+                return {"post_id": post_id, "emoji": emoji}
+
+        client = QueuedDiscourseClient(_Inner(), queue)
+
+        with self.assertRaises(TimeoutError):
+            client.toggle_reaction(7, "heart", timeout_secs=0.05)
+
+        release.set()
+        self.assertEqual(queue.submit(lambda: "ok").result(timeout=1), "ok")
+        queue.stop()
+
+    def test_queued_client_zero_timeout_means_no_timeout(self) -> None:
+        queue = RequestQueue()
+        release = threading.Event()
+
+        class _Inner:
+            def toggle_reaction(self, post_id: int, emoji: str):
+                release.wait(timeout=1)
+                return {"post_id": post_id, "emoji": emoji}
+
+        client = QueuedDiscourseClient(_Inner(), queue)
+
+        result_holder: list[dict[str, object]] = []
+
+        def run() -> None:
+            result_holder.append(client.toggle_reaction(7, "heart", timeout_secs=0))
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        time.sleep(0.05)
+        release.set()
+        thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result_holder, [{"post_id": 7, "emoji": "heart"}])
+        queue.stop()
+
+    def test_cancelled_delayed_task_does_not_keep_queue_full(self) -> None:
+        queue = RequestQueue(maxsize=1)
+        delayed = queue.submit(lambda: "late", not_before=time.monotonic() + 0.3)
+        delayed.cancel()
+        next_task = queue.submit(lambda: "ok")
+
+        self.assertTrue(delayed.cancelled())
+        self.assertEqual(next_task.result(timeout=1), "ok")
+        queue.stop()
 
 class SQLiteStoreTests(unittest.TestCase):
     def test_store_persists_posts_topics_notifications_and_stats(self) -> None:
@@ -201,13 +467,19 @@ class _DummyClient:
         self.reaction_error: Exception | None = None
         self.reply_error: Exception | None = None
 
-    def toggle_reaction(self, post_id: int, emoji: str) -> dict[str, object]:
+    def toggle_reaction(self, post_id: int, emoji: str, timeout_secs: float | None = None) -> dict[str, object]:
         if self.reaction_error is not None:
             raise self.reaction_error
         self.reactions.append((post_id, emoji))
         return {"post_id": post_id, "emoji": emoji}
 
-    def reply(self, topic_id: int, raw: str, category: int | None = None) -> dict[str, object]:
+    def reply(
+        self,
+        topic_id: int,
+        raw: str,
+        category: int | None = None,
+        timeout_secs: float | None = None,
+    ) -> dict[str, object]:
         if self.reply_error is not None:
             raise self.reply_error
         self.replies.append((topic_id, raw, category))
@@ -240,6 +512,7 @@ class ControlHandlerTests(unittest.TestCase):
         watch = watch_controller or _DummyWatchController()
         handler.server = types.SimpleNamespace(
             api_key="secret",
+            action_timeout_secs=60,
             client=client or _DummyClient(),
             watch_controller=watch,
             shutdown=shutdown or (lambda: None),
@@ -376,6 +649,23 @@ class ControlHandlerTests(unittest.TestCase):
         )
         shutdown.assert_called_once_with()
 
+    def test_like_timeout_returns_504(self) -> None:
+        client = _DummyClient()
+        client.reaction_error = TimeoutError("upstream timeout")
+
+        (status, data), server = self._run_handler(
+            "POST",
+            "/like",
+            body={"post_id": 7},
+            headers={"X-API-Key": "secret"},
+            client=client,
+        )
+
+        self.assertEqual(status, 504)
+        self.assertEqual(data, {"error": "timeout"})
+        self.assertEqual(server.watch_controller._runtime.last_error, "timeout")
+        self.assertEqual(server.watch_controller._runtime.last_error_at, "now")
+
     def test_serve_wires_watch_controller_fatal_shutdown_callback(self) -> None:
         controller = Mock()
         httpd = Mock()
@@ -486,6 +776,47 @@ class ControlServerIntegrationTests(unittest.TestCase):
             if thread.is_alive():
                 server.request_shutdown()
                 thread.join(timeout=2)
+            server.server_close()
+
+    def test_real_http_like_timeout_returns_504(self) -> None:
+        release = threading.Event()
+
+        class _Inner:
+            def toggle_reaction(self, post_id: int, emoji: str) -> dict[str, object]:
+                release.wait(timeout=1)
+                return {"post_id": post_id, "emoji": emoji}
+
+            def reply(self, topic_id: int, raw: str, category: int | None = None) -> dict[str, object]:
+                return {"topic_id": topic_id, "raw": raw, "category": category}
+
+        watch_controller = _DummyWatchController()
+        queue = RequestQueue()
+        server = ControlServer(
+            ("127.0.0.1", 0),
+            ControlHandler,
+            QueuedDiscourseClient(_Inner(), queue),
+            watch_controller,
+            api_key="secret",
+            action_timeout_secs=0.05,
+        )
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            status, data = self._request_json(
+                server.server_address[1],
+                "POST",
+                "/like",
+                body={"post_id": 7},
+                headers={"X-API-Key": "secret"},
+            )
+            self.assertEqual(status, 504)
+            self.assertEqual(data, {"error": "timeout"})
+            self.assertEqual(watch_controller._runtime.last_error, "timeout")
+        finally:
+            release.set()
+            queue.stop()
+            server.request_shutdown()
+            thread.join(timeout=2)
             server.server_close()
 
 

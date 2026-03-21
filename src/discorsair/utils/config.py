@@ -47,10 +47,11 @@ def default_app_config() -> dict[str, Any]:
         "storage": {"path": "data/discorsair.db", "auto_per_site": True, "rotate_daily": False},
         "crawl": {"enabled": True},
         "watch": {"use_unseen": False, "timings_per_topic": 30},
-        "queue": {"maxsize": 0, "timeout_secs": 60},
+        "queue": {"maxsize": 0},
         "server": {
             "host": "127.0.0.1",
             "port": 8080,
+            "action_timeout_secs": 60,
             "interval_secs": 30,
             "max_posts_per_interval": 200,
             "auto_restart": True,
@@ -90,6 +91,7 @@ def load_app_config(path: str | Path) -> dict[str, Any]:
 
 
 def validate_app_config(config: dict[str, Any]) -> None:
+    _validate_removed_fields(config)
     base_url = config.get("site", {}).get("base_url", "")
     if not base_url:
         raise ValueError("config.site.base_url is required")
@@ -101,6 +103,12 @@ def validate_app_config(config: dict[str, Any]) -> None:
         ZoneInfo(tz)
     except ZoneInfoNotFoundError as exc:
         raise ValueError(f"invalid timezone: {tz}") from exc
+
+
+def _validate_removed_fields(config: dict[str, Any]) -> None:
+    queue_cfg = config.get("queue", {})
+    if isinstance(queue_cfg, dict) and "timeout_secs" in queue_cfg:
+        raise ValueError("config.queue.timeout_secs has been removed; delete this field")
 
 
 def _apply_env_overrides(config: dict[str, Any]) -> None:

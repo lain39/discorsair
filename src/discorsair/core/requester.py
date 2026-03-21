@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Optional
 import threading
 from urllib.parse import unquote, urlencode, urljoin, urlparse
@@ -48,10 +49,23 @@ _CSRF_META_RE = re.compile(
 )
 _MAX_RETRY_DELAY_SECS = 300
 _MAX_CHALLENGE_STILL_PRESENT_ATTEMPTS = 3
+_RATE_LIMIT_WAIT_BUFFER_SECS = 5
 
 
 class ChallengeUnresolvedError(RuntimeError):
     """Raised when Cloudflare is still blocking API traffic after a solve attempt."""
+
+
+class RateLimitedError(RuntimeError):
+    """Raised when Discourse asks the client to wait before retrying an endpoint."""
+
+    def __init__(self, wait_seconds: float, detail: str = "") -> None:
+        self.wait_seconds = max(float(wait_seconds), 0.0)
+        self.detail = str(detail or "")
+        message = f"rate limited: wait_seconds={self.wait_seconds:g}"
+        if self.detail:
+            message = f"{message} detail={self.detail}"
+        super().__init__(message)
 
 
 def _normalize_header_key(name: str) -> str:
@@ -101,6 +115,14 @@ def _redact_cookie_pairs(cookies: Dict[str, str]) -> Dict[str, str]:
     return {name: _mask_secret(value) for name, value in cookies.items()}
 
 
+def _header_value(headers: Dict[str, str], name: str) -> str:
+    target = _normalize_header_key(name)
+    for key, value in headers.items():
+        if _normalize_header_key(key) == target:
+            return str(value)
+    return ""
+
+
 def _is_cloudflare_challenge(status: int, headers: Dict[str, str], text: str) -> bool:
     if status == 302:
         location = ""
@@ -137,6 +159,77 @@ def _is_cloudflare_challenge(status: int, headers: Dict[str, str], text: str) ->
         return False
 
     return _CF_CHALLENGE_RE.search(body) is not None
+
+
+def _parse_retry_after_seconds(value: str) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+        seconds = target.timestamp() - time.time()
+    if seconds <= 0:
+        return None
+    return seconds
+
+
+def _extract_rate_limit_wait_seconds(headers: Dict[str, str], text: str) -> float | None:
+    header_wait = _parse_retry_after_seconds(_header_value(headers, "Retry-After"))
+    if header_wait is not None:
+        return header_wait + _RATE_LIMIT_WAIT_BUFFER_SECS
+
+    body = str(text or "").strip()
+    if not body:
+        return None
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    extras = payload.get("extras")
+    if isinstance(extras, dict):
+        wait_seconds = extras.get("wait_seconds")
+        if wait_seconds is not None:
+            parsed = _parse_retry_after_seconds(str(wait_seconds))
+            if parsed is not None:
+                return parsed + _RATE_LIMIT_WAIT_BUFFER_SECS
+        time_left = extras.get("time_left")
+        if time_left is not None:
+            parsed = _parse_retry_after_seconds(str(time_left))
+            if parsed is not None:
+                return parsed + _RATE_LIMIT_WAIT_BUFFER_SECS
+    wait_seconds = payload.get("wait_seconds")
+    if wait_seconds is not None:
+        parsed = _parse_retry_after_seconds(str(wait_seconds))
+        if parsed is not None:
+            return parsed + _RATE_LIMIT_WAIT_BUFFER_SECS
+    return None
+
+
+def _extract_rate_limit_detail(headers: Dict[str, str], text: str) -> str:
+    error_code = _header_value(headers, "Discourse-Rate-Limit-Error-Code")
+    if error_code:
+        return error_code
+    body = str(text or "").strip()
+    if not body:
+        return ""
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return ""
+    if isinstance(payload, dict):
+        detail = payload.get("errors") or payload.get("message") or payload.get("error_type")
+        if isinstance(detail, list):
+            return ", ".join(str(item) for item in detail if item)
+        if detail:
+            return str(detail)
+    return ""
 
 
 def _proxy_key(proxy: str | None) -> str:
@@ -427,7 +520,32 @@ class Requester:
                         )
                         continue
 
-                if response.status >= 500 or response.status == 429:
+                if response.status == 429:
+                    self._session.last_response_ok = False
+                    wait_seconds = _extract_rate_limit_wait_seconds(response.headers, response.text)
+                    if wait_seconds is not None:
+                        detail = _extract_rate_limit_detail(response.headers, response.text)
+                        _LOG.warning(
+                            "request rate limited: method=%s url=%s wait_seconds=%s detail=%s",
+                            method.upper(),
+                            url,
+                            f"{wait_seconds:g}",
+                            detail or "-",
+                        )
+                        raise RateLimitedError(wait_seconds=wait_seconds, detail=detail)
+                    if not self._can_retry(attempt):
+                        return response
+                    _LOG.warning(
+                        "retryable status (%s/%s): %s",
+                        attempt + 1,
+                        self._attempt_limit_label(),
+                        response.status,
+                    )
+                    self._backoff(attempt)
+                    attempt += 1
+                    continue
+
+                if response.status >= 500:
                     self._session.last_response_ok = False
                     if not self._can_retry(attempt):
                         return response
@@ -554,7 +672,8 @@ class Requester:
         now = time.monotonic()
         elapsed = now - self._session.last_request_ts
         if elapsed < self._min_interval_secs:
-            time.sleep(self._min_interval_secs - elapsed)
+            wait_seconds = self._min_interval_secs - elapsed
+            time.sleep(wait_seconds)
         self._session.last_request_ts = time.monotonic()
 
     def _flaresolverr_request(
@@ -577,7 +696,7 @@ class Requester:
         payload: Dict[str, Any] = {
             "cmd": f"request.{method.lower()}",
             "url": url,
-            "maxTimeout": int(self._flaresolverr_timeout_secs * 1000),
+            "maxTimeout": max(1, int(self._flaresolverr_timeout_secs * 1000)),
         }
         if include_cookies and self._session.cookies:
             payload["cookies"] = [{"name": k, "value": v} for k, v in self._session.cookies.items()]

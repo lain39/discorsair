@@ -27,6 +27,7 @@ class ServerSettings:
     port: int
     schedule: list[str]
     api_key: str
+    action_timeout_secs: float
     interval_secs: int
     max_posts_per_interval: int | None
     auto_restart: bool
@@ -67,6 +68,7 @@ def build_runtime_settings(app_config: dict[str, Any], storage_path: str) -> Run
             port=int(server_cfg.get("port", 8080)),
             schedule=list(server_cfg.get("schedule", [])),
             api_key=server_cfg.get("api_key", ""),
+            action_timeout_secs=float(server_cfg.get("action_timeout_secs", 60)),
             interval_secs=int(server_cfg.get("interval_secs", 30)),
             max_posts_per_interval=server_cfg.get("max_posts_per_interval"),
             auto_restart=bool(server_cfg.get("auto_restart", True)),

@@ -28,10 +28,11 @@ CLI 命令名：`discorsair`
 - 日志文件：`logging.path`
 - 请求节流：`request.min_interval_secs`（默认 1 秒）
 - 未读优先：`watch.use_unseen`
-- 队列：`queue.maxsize` / `queue.timeout_secs`
+- 队列：`queue.maxsize`
 - 通知：`notify.enabled` + `notify.url` + `notify.chat_id`
 - 通知前缀：`notify.prefix` / `notify.error_prefix`
 - 服务：`discorsair serve` 启动 HTTP 控制服务
+- 控制接口超时：`server.action_timeout_secs`（`0` 表示不设超时）
 - 服务默认仅监听 `127.0.0.1`
 - 如果 `server.host` 或 `--host` 使用非回环地址，必须配置 `server.api_key`
 - 运行时只会在成功请求后写回 `auth.cookie` 中的 `_t`，不会持久化其他 cookie，也不会用空 cookie 覆盖配置

@@ -53,8 +53,7 @@
   },
   // 请求队列
   "queue": {
-    "maxsize": 0,
-    "timeout_secs": 60
+    "maxsize": 0
   },
 
   // HTTP 控制服务
@@ -62,6 +61,8 @@
     // 监听非本机地址时，务必配置 api_key
     "host": "127.0.0.1",
     "port": 8080,
+    // HTTP 控制接口（如 /like /reply）的等待超时，超时返回 504；不影响 watch；0 表示不设超时
+    "action_timeout_secs": 60,
     "interval_secs": 30,
     "max_posts_per_interval": 200,
     "auto_restart": true,

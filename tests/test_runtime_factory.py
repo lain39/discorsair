@@ -48,6 +48,7 @@ class RuntimeFactoryTests(unittest.TestCase):
                 port=8080,
                 schedule=[],
                 api_key="",
+                action_timeout_secs=60.0,
                 interval_secs=30,
                 max_posts_per_interval=200,
                 auto_restart=True,
@@ -151,6 +152,18 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertIsNotNone(notifier)
         self.assertEqual(notifier._url, "https://env-notify.example")
 
+    def test_load_runtime_app_config_rejects_removed_queue_timeout_secs(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "queue": {"timeout_secs": 60}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.queue.timeout_secs has been removed"):
+            self._load_runtime_app_config(config_text)
+
     def test_load_settings_builds_structured_values(self) -> None:
         app_config = {
             "site": {"base_url": "https://meta.example.com/forum"},
@@ -164,6 +177,7 @@ class RuntimeFactoryTests(unittest.TestCase):
                 "port": 9090,
                 "schedule": ["08:00-10:00"],
                 "api_key": "k",
+                "action_timeout_secs": 0.5,
                 "interval_secs": 15,
                 "max_posts_per_interval": 77,
                 "auto_restart": False,
@@ -181,6 +195,7 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertEqual(settings.watch.timings_per_topic, 9)
         self.assertEqual(settings.watch.notify_interval_secs, 321)
         self.assertEqual(settings.server.port, 9090)
+        self.assertEqual(settings.server.action_timeout_secs, 0.5)
         self.assertEqual(settings.server.max_posts_per_interval, 77)
 
     def test_build_services_closes_store_when_client_setup_fails(self) -> None:
@@ -189,7 +204,7 @@ class RuntimeFactoryTests(unittest.TestCase):
             "auth": {"cookie": "_t=1", "proxy": "", "disabled": False},
             "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 2, "min_interval_secs": 1},
             "flaresolverr": {"enabled": False, "base_url": "", "request_timeout_secs": 60, "ua_probe_url": ""},
-            "queue": {"maxsize": 0, "timeout_secs": 60},
+            "queue": {"maxsize": 0},
         }
         store = Mock()
 

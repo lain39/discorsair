@@ -19,9 +19,11 @@ sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions
 
 from discorsair.core.requester import (
     ChallengeUnresolvedError,
+    RateLimitedError,
     Requester,
     _build_flaresolverr_proxy,
     _build_flaresolverr_proxy_with_mode,
+    _extract_rate_limit_wait_seconds,
     _extract_csrf_token_from_html,
     _retry_delay_secs,
     _translate_proxy_for_flaresolverr,
@@ -87,6 +89,13 @@ class RequesterTests(unittest.TestCase):
     def test_extract_csrf_token_from_html(self) -> None:
         html = '<html><head><meta name="csrf-token" content="csrf-123"></head></html>'
         self.assertEqual(_extract_csrf_token_from_html(html), "csrf-123")
+
+    def test_extract_rate_limit_wait_seconds_prefers_retry_after(self) -> None:
+        wait = _extract_rate_limit_wait_seconds(
+            {"Retry-After": "12"},
+            '{"extras":{"wait_seconds":5}}',
+        )
+        self.assertEqual(wait, 17)
 
     def test_retry_delay_grows_with_attempts(self) -> None:
         self.assertEqual(_retry_delay_secs(0), 1)
@@ -299,6 +308,22 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(request_call.call_count, 3)
         self.assertEqual(backoff.call_count, 2)
+
+    def test_rate_limited_response_raises_rate_limited_error_without_backoff(self) -> None:
+        requester = self._build_requester(max_retries=3)
+        response = self._json_response(
+            429,
+            '{"errors":["slow down"],"extras":{"wait_seconds":7}}',
+            headers={"Content-Type": "application/json", "Retry-After": "7"},
+        )
+
+        with patch("discorsair.core.requester.requests.request", return_value=response):
+            with patch.object(requester, "_backoff") as backoff:
+                with self.assertRaises(RateLimitedError) as ctx:
+                    requester.request("get", "/latest.json", allow_fallback=False)
+
+        self.assertEqual(ctx.exception.wait_seconds, 12)
+        backoff.assert_not_called()
 
     def test_cross_origin_request_does_not_send_or_persist_site_cookies(self) -> None:
         requester = self._build_requester(

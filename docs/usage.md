@@ -22,6 +22,9 @@
 - `request.impersonate_target` 指定 `curl_cffi` impersonate 目标；缺省或显式留空都会按空值处理，运行时再依赖内置 UA 映射、UA 探测或后续推断来决定
 - UA 探测只用于获取 `userAgent`，不会携带当前站点 cookie，也不会把 probe 返回的 cookie 写回账号状态
 - `request.max_retries` 请求失败后的额外重试次数；`0` 表示无限重试。默认值为 `1`，与旧版默认实际行为一致
+- 如果 Discourse 返回 `429` 且运行时能解析出 `Retry-After` 或响应体里的 `wait_seconds/time_left`，会按该等待时间再额外加 5 秒缓冲，进行接口级等待；当前这次调用不会丢弃，而是延后后重试
+- 上述可解析等待时间的 `429` 不会让整个请求队列睡死：其他独立接口仍可继续执行；但发起这次调用的那条业务链会停在当前接口上等待结果，不会跳过它继续往后跑
+- 对当前 `watch` 流程来说，`get_topic` / `post_timings` 被 `429` 时，当前 topic 会停在这里等待；正常情况下不会在同一条 watch 链里无限积压更多同类请求
 - 遇到 `BAD CSRF` 时会强制重新请求 `/session/csrf` 获取新 token，不会仅复用当前内存里的缓存 token
 - `flaresolverr.ua_probe_url` 可省略，不填时默认使用 `data:,`
 - `storage.path` 指定 SQLite 存储路径（默认 `data/discorsair.db`）
@@ -34,7 +37,7 @@
 - `watch.use_unseen` 优先使用 `/unseen.json`（空则回退到 `/latest.json`）
 - `watch.timings_per_topic` 每次刷多少楼层（默认 30）
 - `queue.maxsize` 请求队列长度（0 为无限）
-- `queue.timeout_secs` 队列任务超时时间
+- `queue.maxsize` 只限制 ready/running 的任务；已进入 `429` 冷却等待的 delayed 任务不会占满这个容量
 - `notify.enabled` 启用通知
 - `notify.interval_secs` 通知轮询间隔（默认 600 秒）
 - `notify.url` 通知接口地址（类似 Telegram `sendMessage`）
@@ -45,6 +48,7 @@
 - `notify.timeout_secs` 通知请求超时
 - `server.host` / `server.port` 监听地址
 - 默认仅监听 `127.0.0.1`
+- `server.action_timeout_secs` HTTP 控制接口（如 `/like`、`/reply`）的等待超时；超时返回 `504`，不影响 watch；`0` 表示不设超时
 - `server.interval_secs` watch 轮询间隔
 - `server.max_posts_per_interval` 每轮最多抓取帖子数
 - `server.schedule` 运行时段（如 `08:00-12:00`）

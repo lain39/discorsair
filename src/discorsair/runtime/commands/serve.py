@@ -51,6 +51,7 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
         client=context.services.client,
         watch_controller=controller,
         api_key=api_key,
+        action_timeout_secs=server.action_timeout_secs,
         on_action_success=_on_action_success,
     )
     fatal_error = controller.fatal_error()

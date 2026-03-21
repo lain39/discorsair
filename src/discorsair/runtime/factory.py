@@ -55,7 +55,7 @@ def build_services(app_config: dict[str, Any], settings: RuntimeSettings) -> Run
         base_client = build_client(app_config)
         queue_cfg = app_config.get("queue", {})
         queue = RequestQueue(maxsize=int(queue_cfg.get("maxsize", 0)))
-        client = QueuedDiscourseClient(base_client, queue, timeout_secs=float(queue_cfg.get("timeout_secs", 60)))
+        client = QueuedDiscourseClient(base_client, queue)
         return RuntimeServices(store=store, base_client=base_client, client=client, queue=queue)
     except Exception:
         if queue is not None:

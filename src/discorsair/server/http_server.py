@@ -441,7 +441,11 @@ class ControlHandler(BaseHTTPRequestHandler):
                 if not post_id:
                     self._send(400, {"error": "post_id required"})
                     return
-                result = self.server.client.toggle_reaction(post_id, emoji)
+                result = self.server.client.toggle_reaction(
+                    post_id,
+                    emoji,
+                    timeout_secs=self.server.action_timeout_secs,
+                )
                 if self.server.on_action_success:
                     self.server.on_action_success()
                 self._send(200, {"ok": True, "result": result})
@@ -454,7 +458,12 @@ class ControlHandler(BaseHTTPRequestHandler):
                 if not topic_id or not raw:
                     self._send(400, {"error": "topic_id and raw required"})
                     return
-                result = self.server.client.reply(topic_id, raw, category)
+                result = self.server.client.reply(
+                    topic_id,
+                    raw,
+                    category,
+                    timeout_secs=self.server.action_timeout_secs,
+                )
                 if self.server.on_action_success:
                     self.server.on_action_success()
                 self._send(200, {"ok": True, "result": result})
@@ -489,12 +498,14 @@ class ControlServer(ThreadingHTTPServer):
         client: QueuedDiscourseClient,
         watch_controller: WatchController,
         api_key: str | None = None,
+        action_timeout_secs: float = 60.0,
         on_action_success: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.client = client
         self.watch_controller = watch_controller
         self.api_key = api_key or ""
+        self.action_timeout_secs = max(float(action_timeout_secs), 0.0)
         self.on_action_success = on_action_success
         self._shutdown_requested = False
         self._shutdown_lock = threading.Lock()
@@ -513,6 +524,7 @@ def serve(
     client: QueuedDiscourseClient,
     watch_controller: WatchController,
     api_key: str | None = None,
+    action_timeout_secs: float = 60.0,
     on_action_success: Callable[[], None] | None = None,
 ) -> None:
     validate_server_binding(host, api_key)
@@ -522,6 +534,7 @@ def serve(
         client,
         watch_controller,
         api_key=api_key,
+        action_timeout_secs=action_timeout_secs,
         on_action_success=on_action_success,
     )
     watch_controller.set_on_fatal(httpd.request_shutdown)

@@ -53,6 +53,7 @@ class CliRuntimeTests(unittest.TestCase):
                 port=8080,
                 schedule=[],
                 api_key="",
+                action_timeout_secs=60.0,
                 interval_secs=30,
                 max_posts_per_interval=200,
                 auto_restart=True,
@@ -175,6 +176,7 @@ class CliRuntimeTests(unittest.TestCase):
             client=services.client,
             watch_controller=controller,
             api_key="",
+            action_timeout_secs=60,
             on_action_success=serve_kwargs["on_action_success"],
         )
 
