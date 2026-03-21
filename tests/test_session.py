@@ -128,10 +128,11 @@ class WatchAndServerTests(unittest.TestCase):
         on_stop = Mock()
         on_auth_invalid = Mock()
         on_fatal = Mock()
+        notifier = Mock()
         controller = WatchController(
             client=_DummyClient(),
             store=_DummyStore(),
-            notifier=None,
+            notifier=notifier,
             interval_secs=1,
             max_posts_per_interval=None,
             crawl_enabled=True,
@@ -169,14 +170,21 @@ class WatchAndServerTests(unittest.TestCase):
         on_stop.assert_called_once_with()
         on_auth_invalid.assert_called_once()
         on_fatal.assert_called_once_with()
+        self.assertEqual(notifier.send_error.call_count, 2)
+        self.assertEqual(notifier.send_error.call_args_list[0].args, ("watch stopped: auth error: not_logged_in",))
+        self.assertEqual(
+            notifier.send_error.call_args_list[1].args,
+            ("watch stopped: stop_type=auth_invalid source=watch stopped detail=not_logged_in",),
+        )
 
     def test_watch_controller_does_not_restart_on_unresolved_challenge(self) -> None:
         on_stop = Mock()
         on_fatal = Mock()
+        notifier = Mock()
         controller = WatchController(
             client=_DummyClient(),
             store=_DummyStore(),
-            notifier=None,
+            notifier=notifier,
             interval_secs=1,
             max_posts_per_interval=None,
             crawl_enabled=True,
@@ -212,13 +220,22 @@ class WatchAndServerTests(unittest.TestCase):
         self.assertTrue(controller._runtime.stop_event.is_set())
         on_stop.assert_called_once_with()
         on_fatal.assert_called_once_with()
+        self.assertEqual(notifier.send_error.call_count, 2)
+        self.assertEqual(
+            notifier.send_error.call_args_list[1].args,
+            (
+                "watch stopped: stop_type=unresolved_challenge "
+                "source=watch stopped detail=challenge still present after solve",
+            ),
+        )
 
     def test_watch_controller_runs_on_stop_when_same_error_threshold_hits(self) -> None:
         on_stop = Mock()
+        notifier = Mock()
         controller = WatchController(
             client=_DummyClient(),
             store=_DummyStore(),
-            notifier=None,
+            notifier=notifier,
             interval_secs=1,
             max_posts_per_interval=None,
             crawl_enabled=True,
@@ -251,6 +268,74 @@ class WatchAndServerTests(unittest.TestCase):
         self.assertIsNotNone(controller._runtime.stop_event)
         self.assertTrue(controller._runtime.stop_event.is_set())
         on_stop.assert_called_once_with()
+        self.assertEqual(notifier.send_error.call_count, 3)
+        self.assertEqual(
+            notifier.send_error.call_args_list[-1].args,
+            ("watch stopped: stop_type=same_error_threshold same_error_count=2 detail=boom",),
+        )
+
+    def test_watch_controller_notifies_stop_type_when_auto_restart_disabled(self) -> None:
+        notifier = Mock()
+        controller = WatchController(
+            client=_DummyClient(),
+            store=_DummyStore(),
+            notifier=notifier,
+            interval_secs=1,
+            max_posts_per_interval=None,
+            crawl_enabled=True,
+            use_unseen=False,
+            timings_per_topic=5,
+            schedule_windows=[],
+            notify_interval_secs=60,
+            auto_restart=False,
+            restart_backoff_secs=1,
+            max_restarts=0,
+            same_error_stop_threshold=0,
+            timezone_name="UTC",
+        )
+
+        with patch("discorsair.server.http_server.watch", side_effect=RuntimeError("boom")):
+            started = controller.start(use_schedule=False)
+            self.assertTrue(started)
+            controller._runtime.thread.join(timeout=2)
+
+        self.assertEqual(notifier.send_error.call_count, 2)
+        self.assertEqual(
+            notifier.send_error.call_args_list[-1].args,
+            ("watch stopped: stop_type=auto_restart_disabled detail=boom",),
+        )
+
+    def test_watch_controller_notifies_stop_type_when_max_restarts_exceeded(self) -> None:
+        notifier = Mock()
+        controller = WatchController(
+            client=_DummyClient(),
+            store=_DummyStore(),
+            notifier=notifier,
+            interval_secs=1,
+            max_posts_per_interval=None,
+            crawl_enabled=True,
+            use_unseen=False,
+            timings_per_topic=5,
+            schedule_windows=[],
+            notify_interval_secs=60,
+            auto_restart=True,
+            restart_backoff_secs=1,
+            max_restarts=1,
+            same_error_stop_threshold=0,
+            timezone_name="UTC",
+        )
+
+        with patch("discorsair.server.http_server.watch", side_effect=RuntimeError("boom")):
+            with patch("discorsair.server.http_server.time.sleep"):
+                started = controller.start(use_schedule=False)
+                self.assertTrue(started)
+                controller._runtime.thread.join(timeout=2)
+
+        self.assertEqual(notifier.send_error.call_count, 3)
+        self.assertEqual(
+            notifier.send_error.call_args_list[-1].args,
+            ("watch stopped: stop_type=max_restarts_exceeded max_restarts=1 detail=boom",),
+        )
 
     def test_poll_notifications_marks_only_successful_sends(self) -> None:
         store = _RecordingStore()

@@ -132,16 +132,24 @@ class WatchController:
                             self._same_error_count,
                         )
                         if self._notifier:
-                            self._notifier.send_error(
-                                f"watch auto-stopped after {self._same_error_count} consecutive same errors: {exc}"
+                            self._notify_stop(
+                                "same_error_threshold",
+                                detail=str(exc),
+                                extra={"same_error_count": str(self._same_error_count)},
                             )
                         self._finalize_stop()
                         return
                     if not self._auto_restart:
+                        self._notify_stop("auto_restart_disabled", detail=str(exc))
                         self._finalize_stop()
                         return
                     restarts += 1
                     if self._max_restarts > 0 and restarts > self._max_restarts:
+                        self._notify_stop(
+                            "max_restarts_exceeded",
+                            detail=str(exc),
+                            extra={"max_restarts": str(self._max_restarts)},
+                        )
                         self._finalize_stop()
                         return
                     time.sleep(max(self._restart_backoff_secs, 1))
@@ -219,10 +227,23 @@ class WatchController:
         self._runtime.last_error = message
         self._runtime.last_error_at = _now()
 
+    def _notify_stop(self, stop_type: str, *, detail: str, extra: dict[str, str] | None = None) -> None:
+        if not self._notifier:
+            return
+        parts = [f"watch stopped: stop_type={stop_type}"]
+        if extra:
+            for key, value in extra.items():
+                if value:
+                    parts.append(f"{key}={value}")
+        if detail:
+            parts.append(f"detail={detail}")
+        self._notifier.send_error(" ".join(parts))
+
     def handle_auth_invalid(self, exc: Exception, *, source: str) -> None:
         logging.getLogger(__name__).error("%s due to auth error: %s", source, exc)
         self._fatal_error = exc
         self.report_error(str(exc), f"{source}: auth error: {exc}")
+        self._notify_stop("auth_invalid", detail=str(exc), extra={"source": source})
         if self._on_auth_invalid:
             self._on_auth_invalid(exc)
         self._finalize_stop()
@@ -233,6 +254,7 @@ class WatchController:
         logging.getLogger(__name__).error("%s due to unresolved challenge: %s", source, exc)
         self._fatal_error = exc
         self.report_error(str(exc), f"{source}: unresolved challenge: {exc}")
+        self._notify_stop("unresolved_challenge", detail=str(exc), extra={"source": source})
         self._finalize_stop()
         if self._on_fatal:
             self._on_fatal()
