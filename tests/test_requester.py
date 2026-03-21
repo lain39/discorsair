@@ -31,7 +31,55 @@ from discorsair.core.session import SessionState
 from discorsair.discourse.client import DiscourseAuthError
 
 
+class _HttpResponse:
+    def __init__(self, status_code: int, text: str, headers: dict[str, str] | None = None, cookies: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers or {}
+        self.cookies = cookies or {}
+
+
 class RequesterTests(unittest.TestCase):
+    def _build_requester(self, **overrides) -> Requester:
+        session_defaults = {
+            "base_url": "https://forum.example",
+            "cookie_header": "_t=1",
+            "impersonate_target": "chrome110",
+            "user_agent": "ua",
+            "proxy": None,
+        }
+        requester_defaults = {
+            "flaresolverr_base_url": None,
+            "flaresolverr_timeout_secs": 60,
+            "ua_probe_url": None,
+            "debug": False,
+            "min_interval_secs": 0.0,
+            "max_retries": 1,
+            "timeout_secs": 30,
+            "flaresolverr_use_base_url_for_csrf": False,
+            "flaresolverr_in_docker": True,
+        }
+        for key in list(session_defaults):
+            if key in overrides:
+                session_defaults[key] = overrides.pop(key)
+        requester_defaults.update(overrides)
+        return Requester(session=SessionState(**session_defaults), **requester_defaults)
+
+    def _json_response(
+        self,
+        status_code: int,
+        body: str = "{\"ok\":true}",
+        *,
+        headers: dict[str, str] | None = None,
+        cookies: dict[str, str] | None = None,
+    ) -> _HttpResponse:
+        return _HttpResponse(
+            status_code,
+            body,
+            headers or {"Content-Type": "application/json"},
+            cookies,
+        )
+
     def test_extract_csrf_token_from_html(self) -> None:
         html = '<html><head><meta name="csrf-token" content="csrf-123"></head></html>'
         self.assertEqual(_extract_csrf_token_from_html(html), "csrf-123")
@@ -85,15 +133,10 @@ class RequesterTests(unittest.TestCase):
         )
 
     def test_ensure_user_agent_probe_does_not_send_cookies(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1; cf_clearance=abc",
-                impersonate_target="chrome110",
-                user_agent="",
-            ),
+        requester = self._build_requester(
+            cookie_header="_t=1; cf_clearance=abc",
+            user_agent="",
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
             ua_probe_url="https://forum.example/latest.json",
         )
 
@@ -122,15 +165,10 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(requester._session.cookies["cf_clearance"], "abc")
 
     def test_request_infers_impersonate_target_from_flaresolverr_user_agent(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="",
-                user_agent="",
-            ),
+        requester = self._build_requester(
+            impersonate_target="",
+            user_agent="",
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
             ua_probe_url="https://forum.example/latest.json",
         )
 
@@ -166,39 +204,24 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(request_call.call_args.kwargs["impersonate"], "chrome142")
 
     def test_retry_after_challenge_handles_retry_exception(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             max_retries=2,
         )
-
-        class DummyResponse:
-            def __init__(self, status_code: int, text: str, headers: dict[str, str] | None = None) -> None:
-                self.status_code = status_code
-                self.text = text
-                self.headers = headers or {}
-                self.cookies = {}
 
         calls: list[str] = []
 
         def fake_request(**kwargs):
             calls.append(kwargs["url"])
             if len(calls) == 1:
-                return DummyResponse(
+                return _HttpResponse(
                     403,
                     "<html>Just a moment</html>",
                     {"Content-Type": "text/html"},
                 )
             if len(calls) == 2:
                 raise RuntimeError("retry failed")
-            return DummyResponse(200, "{\"ok\":true}", {"Content-Type": "application/json"})
+            return self._json_response(200)
 
         with patch("discorsair.core.requester.requests.request", side_effect=fake_request):
             with patch.object(requester, "_solve_challenge") as solve:
@@ -211,25 +234,10 @@ class RequesterTests(unittest.TestCase):
         backoff.assert_called_once()
 
     def test_challenge_retry_replaces_csrf_header_from_flaresolverr_html(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             max_retries=1,
         )
-
-        class DummyResponse:
-            def __init__(self, status_code: int, text: str, headers: dict[str, str] | None = None) -> None:
-                self.status_code = status_code
-                self.text = text
-                self.headers = headers or {}
-                self.cookies = {}
 
         class DummyFsResponse:
             def json(self) -> dict[str, object]:
@@ -248,8 +256,8 @@ class RequesterTests(unittest.TestCase):
         def fake_request(**kwargs):
             calls.append(kwargs)
             if len(calls) == 1:
-                return DummyResponse(403, "<html>Just a moment</html>", {"Content-Type": "text/html"})
-            return DummyResponse(200, "{\"ok\":true}", {"Content-Type": "application/json"})
+                return _HttpResponse(403, "<html>Just a moment</html>", {"Content-Type": "text/html"})
+            return self._json_response(200)
 
         with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()):
             with patch("discorsair.core.requester.requests.request", side_effect=fake_request):
@@ -267,27 +275,8 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(requester.get_csrf_token_hint(), "new-csrf")
 
     def test_max_retries_counts_additional_retries(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
-            flaresolverr_base_url=None,
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
-            max_retries=1,
-        )
-
-        class DummyResponse:
-            def __init__(self, status_code: int) -> None:
-                self.status_code = status_code
-                self.text = "{\"ok\":false}"
-                self.headers = {"Content-Type": "application/json"}
-                self.cookies = {}
-
-        responses = [DummyResponse(500), DummyResponse(200)]
+        requester = self._build_requester(max_retries=1)
+        responses = [self._json_response(500, "{\"ok\":false}"), self._json_response(200)]
 
         with patch("discorsair.core.requester.requests.request", side_effect=responses) as request_call:
             with patch.object(requester, "_backoff") as backoff:
@@ -298,27 +287,8 @@ class RequesterTests(unittest.TestCase):
         backoff.assert_called_once()
 
     def test_max_retries_zero_retries_until_success(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
-            flaresolverr_base_url=None,
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
-            max_retries=0,
-        )
-
-        class DummyResponse:
-            def __init__(self, status_code: int) -> None:
-                self.status_code = status_code
-                self.text = "{\"ok\":true}"
-                self.headers = {"Content-Type": "application/json"}
-                self.cookies = {}
-
-        responses = [RuntimeError("network-1"), RuntimeError("network-2"), DummyResponse(200)]
+        requester = self._build_requester(max_retries=0)
+        responses = [RuntimeError("network-1"), RuntimeError("network-2"), self._json_response(200)]
 
         with patch("discorsair.core.requester.requests.request", side_effect=responses) as request_call:
             with patch.object(requester, "_backoff") as backoff:
@@ -329,26 +299,20 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(backoff.call_count, 2)
 
     def test_cross_origin_request_does_not_send_or_persist_site_cookies(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1; cf_clearance=abc",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
+            cookie_header="_t=1; cf_clearance=abc",
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
         )
 
-        class DummyResponse:
-            def __init__(self) -> None:
-                self.status_code = 403
-                self.text = "<html>Just a moment</html>"
-                self.headers = {"Content-Type": "text/html"}
-                self.cookies = {"external_cookie": "1"}
-
-        with patch("discorsair.core.requester.requests.request", return_value=DummyResponse()) as request_call:
+        with patch(
+            "discorsair.core.requester.requests.request",
+            return_value=_HttpResponse(
+                403,
+                "<html>Just a moment</html>",
+                {"Content-Type": "text/html"},
+                {"external_cookie": "1"},
+            ),
+        ) as request_call:
             with patch.object(requester, "_solve_challenge") as solve:
                 response = requester.request("get", "https://other.example/ping")
 
@@ -361,17 +325,9 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(requester._session.cookies["cf_clearance"], "abc")
 
     def test_flaresolverr_request_uses_structured_proxy_payload(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-                proxy="http://proxy.user:p%40ss%26word@127.0.0.1:5352",
-            ),
+        requester = self._build_requester(
+            proxy="http://proxy.user:p%40ss%26word@127.0.0.1:5352",
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
         )
 
         class DummyFsResponse:
@@ -392,17 +348,9 @@ class RequesterTests(unittest.TestCase):
         )
 
     def test_flaresolverr_request_keeps_loopback_proxy_when_not_in_docker(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-                proxy="http://proxy.user:p%40ss%26word@127.0.0.1:5352",
-            ),
+        requester = self._build_requester(
+            proxy="http://proxy.user:p%40ss%26word@127.0.0.1:5352",
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             flaresolverr_in_docker=False,
         )
 
@@ -424,16 +372,9 @@ class RequesterTests(unittest.TestCase):
         )
 
     def test_fetch_csrf_via_flaresolverr_aligns_user_agent(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="",
-            ),
+        requester = self._build_requester(
+            user_agent="",
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             flaresolverr_use_base_url_for_csrf=True,
         )
 
@@ -457,16 +398,8 @@ class RequesterTests(unittest.TestCase):
         self.assertTrue(requester.last_response_ok())
 
     def test_fetch_csrf_via_flaresolverr_retries_on_failure(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             flaresolverr_use_base_url_for_csrf=True,
             max_retries=1,
         )
@@ -491,16 +424,8 @@ class RequesterTests(unittest.TestCase):
         self.assertTrue(requester.last_response_ok())
 
     def test_fetch_csrf_via_flaresolverr_marks_last_response_failed_on_error(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             flaresolverr_use_base_url_for_csrf=True,
             max_retries=1,
         )
@@ -513,16 +438,8 @@ class RequesterTests(unittest.TestCase):
         self.assertFalse(requester.last_response_ok())
 
     def test_fetch_csrf_via_flaresolverr_auth_error_is_not_retried(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             flaresolverr_use_base_url_for_csrf=True,
             max_retries=3,
         )
@@ -536,16 +453,8 @@ class RequesterTests(unittest.TestCase):
         self.assertFalse(requester.last_response_ok())
 
     def test_flaresolverr_cookies_without_csrf_meta_raise_auth_error(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
         )
 
         class DummyFsResponse:
@@ -563,27 +472,15 @@ class RequesterTests(unittest.TestCase):
                 requester._solve_challenge()
 
     def test_challenge_solve_auth_error_is_not_retried(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             max_retries=3,
         )
 
-        class DummyResponse:
-            def __init__(self) -> None:
-                self.status_code = 403
-                self.text = "<html>Just a moment</html>"
-                self.headers = {"Content-Type": "text/html"}
-                self.cookies = {}
-
-        with patch("discorsair.core.requester.requests.request", return_value=DummyResponse()) as request_call:
+        with patch(
+            "discorsair.core.requester.requests.request",
+            return_value=_HttpResponse(403, "<html>Just a moment</html>", {"Content-Type": "text/html"}),
+        ) as request_call:
             with patch.object(requester, "_solve_challenge", side_effect=DiscourseAuthError("not_logged_in")):
                 with patch.object(requester, "_backoff") as backoff:
                     with self.assertRaises(DiscourseAuthError):
@@ -594,25 +491,12 @@ class RequesterTests(unittest.TestCase):
         self.assertFalse(requester.last_response_ok())
 
     def test_challenge_still_present_after_solve_stops_even_with_unlimited_retries(self) -> None:
-        requester = Requester(
-            session=SessionState(
-                base_url="https://forum.example",
-                cookie_header="_t=1",
-                impersonate_target="chrome110",
-                user_agent="ua",
-            ),
+        requester = self._build_requester(
+            cookie_header="_t=1; cf_clearance=old-clearance; session=abc",
             flaresolverr_base_url="http://flaresolverr:8191",
-            flaresolverr_timeout_secs=60,
-            ua_probe_url=None,
             max_retries=0,
         )
-
-        class DummyResponse:
-            def __init__(self, status_code: int, text: str, headers: dict[str, str] | None = None) -> None:
-                self.status_code = status_code
-                self.text = text
-                self.headers = headers or {}
-                self.cookies = {}
+        requester._session.cf_clearance_cache["direct"] = "cached-clearance"
 
         class DummyFsResponse:
             def json(self) -> dict[str, object]:
@@ -628,7 +512,7 @@ class RequesterTests(unittest.TestCase):
 
         def fake_request(**kwargs):
             calls.append(kwargs)
-            return DummyResponse(403, "<html>Just a moment</html>", {"Content-Type": "text/html"})
+            return _HttpResponse(403, "<html>Just a moment</html>", {"Content-Type": "text/html"})
 
         with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()):
             with patch("discorsair.core.requester.requests.request", side_effect=fake_request):
@@ -638,6 +522,8 @@ class RequesterTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(calls), 4)
         self.assertEqual(backoff.call_count, 2)
+        self.assertEqual(requester._session.cookies, {"_t": "1"})
+        self.assertNotIn("direct", requester._session.cf_clearance_cache)
 
 
 if __name__ == "__main__":

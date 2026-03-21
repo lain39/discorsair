@@ -278,6 +278,26 @@ class Requester:
             return inferred
         return ""
 
+    def _ensure_runtime_identity(self, *, ua_probe_url: str | None, log_context: str) -> tuple[str, str]:
+        user_agent = self._ensure_user_agent(ua_probe_url)
+        impersonate_target = self._ensure_impersonate_target(user_agent)
+        if self._debug and user_agent:
+            if impersonate_target:
+                _LOG.debug(
+                    "%s aligned runtime identity: user_agent=%s impersonate_target=%s",
+                    log_context,
+                    user_agent,
+                    impersonate_target,
+                )
+            else:
+                _LOG.warning(
+                    "%s could not align impersonate target: user_agent=%s impersonate_target=%s",
+                    log_context,
+                    user_agent,
+                    self._session.impersonate_target,
+                )
+        return user_agent, impersonate_target
+
     def request(
         self,
         method: str,
@@ -301,21 +321,10 @@ class Requester:
             while True:
                 self._throttle()
 
-                user_agent = self._ensure_user_agent(ua_probe_url or self._ua_probe_url)
-                impersonate_target = self._ensure_impersonate_target(user_agent)
-                if self._debug and user_agent:
-                    if impersonate_target:
-                        _LOG.debug(
-                            "ua probe aligned runtime identity: user_agent=%s impersonate_target=%s",
-                            user_agent,
-                            impersonate_target,
-                        )
-                    else:
-                        _LOG.warning(
-                            "ua probe could not align impersonate target: user_agent=%s impersonate_target=%s",
-                            user_agent,
-                            self._session.impersonate_target,
-                        )
+                user_agent, impersonate_target = self._ensure_runtime_identity(
+                    ua_probe_url=ua_probe_url or self._ua_probe_url,
+                    log_context="request",
+                )
                 req_headers = _merge_headers(self._default_headers(include_referer=same_origin), headers)
                 if user_agent and not _has_header(req_headers, "User-Agent"):
                     req_headers["User-Agent"] = user_agent
@@ -412,13 +421,10 @@ class Requester:
                         # Treat that as "challenge unresolved", not as an auth problem.
                         self._session.last_response_ok = False
                         challenge_still_present_count += 1
-                        if challenge_still_present_count >= _MAX_CHALLENGE_STILL_PRESENT_ATTEMPTS:
-                            raise ChallengeUnresolvedError("challenge still present after solve")
-                        if not self._can_retry(attempt):
-                            raise ChallengeUnresolvedError("challenge still present after solve")
-                        _LOG.warning("challenge still present after solve")
-                        self._backoff(attempt)
-                        attempt += 1
+                        attempt = self._handle_unresolved_challenge_after_solve(
+                            attempt,
+                            challenge_still_present_count,
+                        )
                         continue
 
                 if response.status >= 500 or response.status == 429:
@@ -511,21 +517,10 @@ class Requester:
             attempt = 0
             while True:
                 self._throttle()
-                user_agent = self._ensure_user_agent(self._ua_probe_url)
-                impersonate_target = self._ensure_impersonate_target(user_agent)
-                if self._debug and user_agent:
-                    if impersonate_target:
-                        _LOG.debug(
-                            "csrf fetch aligned runtime identity: user_agent=%s impersonate_target=%s",
-                            user_agent,
-                            impersonate_target,
-                        )
-                    else:
-                        _LOG.warning(
-                            "csrf fetch could not align impersonate target: user_agent=%s impersonate_target=%s",
-                            user_agent,
-                            self._session.impersonate_target,
-                        )
+                self._ensure_runtime_identity(
+                    ua_probe_url=self._ua_probe_url,
+                    log_context="csrf fetch",
+                )
                 _LOG.info("request: fetching csrf via FlareSolverr base_url")
                 try:
                     self._flaresolverr_request("get", base)
@@ -659,6 +654,27 @@ class Requester:
                 headers[key] = self._csrf_token_hint
                 _LOG.info("request: updated x-csrf-token from FlareSolverr solution")
                 return
+
+    def _clear_non_auth_cookies_after_unresolved_challenge(self) -> None:
+        retained: Dict[str, str] = {}
+        token = self._session.cookies.get("_t")
+        if token:
+            retained["_t"] = token
+        removed_names = sorted(name for name in self._session.cookies if name != "_t")
+        self._session.cookies = retained
+        self._session.cf_clearance_cache.pop(_proxy_key(self._session.proxy), None)
+        if removed_names:
+            _LOG.warning("request: cleared non-_t cookies after unresolved challenge: %s", ",".join(removed_names))
+        else:
+            _LOG.warning("request: unresolved challenge had no non-_t cookies to clear")
+
+    def _handle_unresolved_challenge_after_solve(self, attempt: int, count: int) -> int:
+        _LOG.warning("challenge still present after solve")
+        self._clear_non_auth_cookies_after_unresolved_challenge()
+        if count >= _MAX_CHALLENGE_STILL_PRESENT_ATTEMPTS or not self._can_retry(attempt):
+            raise ChallengeUnresolvedError("challenge still present after solve")
+        self._backoff(attempt)
+        return attempt + 1
 
 
 def _redact_headers(headers: Dict[str, Any]) -> Dict[str, Any]:

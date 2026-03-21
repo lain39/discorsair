@@ -80,6 +80,7 @@
   "notify": {
     "enabled": false,
     "interval_secs": 600,
+    // 可由环境变量 DISCORSAIR_NOTIFY_URL 覆盖
     "url": "",
     "chat_id": "",
     "prefix": "[Discorsair]",

@@ -14,7 +14,7 @@
 - `auth.cookie` 登录 cookie（必填），配置中建议只保存 `_t=...`
 - `auth.proxy` 可设置代理（可留空）
 - `auth.name` 账号标识（用于通知前缀）
-- 支持用环境变量覆盖敏感字段：`DISCORSAIR_AUTH_COOKIE -> auth.cookie`、`DISCORSAIR_AUTH_NAME -> auth.name`、`DISCORSAIR_AUTH_KEY -> server.api_key`
+- 支持用环境变量覆盖敏感字段：`DISCORSAIR_AUTH_COOKIE -> auth.cookie`、`DISCORSAIR_AUTH_NAME -> auth.name`、`DISCORSAIR_AUTH_KEY -> server.api_key`、`DISCORSAIR_NOTIFY_URL -> notify.url`
 - 环境变量覆盖发生在读取配置文件之后、校验之前；因此 `auth.cookie` 可以不写在文件里，改由 `DISCORSAIR_AUTH_COOKIE` 注入
 - `auth.disabled=true` 时会阻止当前账号启动
 - `auth.status` / `auth.disabled` / `auth.last_ok` / `auth.last_fail` / `auth.last_error` / `auth.note` 主要用于运行时状态记录
@@ -72,6 +72,7 @@
 - 该转换由 `src/core/` 处理
 - 过盾时也会使用 FlareSolverr 访问 `base_url`；如果返回 HTML 含 `<meta name="csrf-token" ...>`，运行时会提取该 token，并用于本次重试及后续请求的 CSRF 同步
 - `cf_clearance` 可按代理 IP 做本地缓存，下次同 IP 先尝试复用
+- 如果过盾后重试仍然命中 `challenge still present after solve`，运行时会清理当前站点 cookie，只保留 `_t`，并丢弃当前代理的 `cf_clearance` 缓存，再按现有重试策略继续
 - 运行时仅在成功请求后才会把最新 `_t` 写回 `auth.cookie`；其他 cookie 不会持久化到配置，空 `_t` 或未变化的值也不会覆盖配置
 
 ## CLI

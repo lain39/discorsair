@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
 
 from discorsair.utils.jsonc import loads as jsonc_loads
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+_ENV_OVERRIDE_PATHS: dict[str, tuple[str, str]] = {
+    "DISCORSAIR_AUTH_NAME": ("auth", "name"),
+    "DISCORSAIR_AUTH_COOKIE": ("auth", "cookie"),
+    "DISCORSAIR_AUTH_KEY": ("server", "api_key"),
+    "DISCORSAIR_NOTIFY_URL": ("notify", "url"),
+}
 
 
 def _merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -98,19 +104,18 @@ def validate_app_config(config: dict[str, Any]) -> None:
 
 
 def _apply_env_overrides(config: dict[str, Any]) -> None:
-    auth = config.setdefault("auth", {})
-    server = config.setdefault("server", {})
-    if not isinstance(auth, dict) or not isinstance(server, dict):
-        return
+    for env_name, path in _ENV_OVERRIDE_PATHS.items():
+        value = os.getenv(env_name)
+        if not value:
+            continue
+        _set_nested_value(config, path, value)
 
-    env_name = os.getenv("DISCORSAIR_AUTH_NAME")
-    if env_name:
-        auth["name"] = env_name
 
-    env_cookie = os.getenv("DISCORSAIR_AUTH_COOKIE")
-    if env_cookie:
-        auth["cookie"] = env_cookie
-
-    env_auth_key = os.getenv("DISCORSAIR_AUTH_KEY")
-    if env_auth_key:
-        server["api_key"] = env_auth_key
+def _set_nested_value(config: dict[str, Any], path: tuple[str, ...], value: str) -> None:
+    current: dict[str, Any] = config
+    for key in path[:-1]:
+        node = current.setdefault(key, {})
+        if not isinstance(node, dict):
+            return
+        current = node
+    current[path[-1]] = value

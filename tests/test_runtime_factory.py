@@ -24,6 +24,20 @@ from discorsair.runtime.settings import RuntimeSettings, ServerSettings, StoreSe
 
 
 class RuntimeFactoryTests(unittest.TestCase):
+    def _load_runtime_app_config(
+        self,
+        config_text: str,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> tuple[dict[str, object], Path]:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "app.json"
+            config_path.write_text(config_text, encoding="utf-8")
+            with patch.dict("os.environ", env or {}, clear=False):
+                with patch("discorsair.runtime.factory.setup_logging"):
+                    app_config = load_runtime_app_config(str(config_path))
+            return app_config, config_path
+
     def _settings(self) -> RuntimeSettings:
         return RuntimeSettings(
             timezone_name="UTC",
@@ -79,24 +93,20 @@ class RuntimeFactoryTests(unittest.TestCase):
   "server": {"api_key": ""}
 }
 """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "app.json"
-            config_path.write_text(config_text, encoding="utf-8")
-            with patch.dict(
-                "os.environ",
-                {
-                    "DISCORSAIR_AUTH_NAME": "env-name",
-                    "DISCORSAIR_AUTH_COOKIE": "_t=env-token",
-                    "DISCORSAIR_AUTH_KEY": "env-key",
-                },
-                clear=False,
-            ):
-                with patch("discorsair.runtime.factory.setup_logging"):
-                    app_config = load_runtime_app_config(str(config_path))
+        app_config, config_path = self._load_runtime_app_config(
+            config_text,
+            env={
+                "DISCORSAIR_AUTH_NAME": "env-name",
+                "DISCORSAIR_AUTH_COOKIE": "_t=env-token",
+                "DISCORSAIR_AUTH_KEY": "env-key",
+                "DISCORSAIR_NOTIFY_URL": "https://env-notify.example",
+            },
+        )
 
         self.assertEqual(app_config["auth"]["name"], "env-name")
         self.assertEqual(app_config["auth"]["cookie"], "_t=env-token")
         self.assertEqual(app_config["server"]["api_key"], "env-key")
+        self.assertEqual(app_config["notify"]["url"], "https://env-notify.example")
         self.assertEqual(app_config["_path"], str(config_path))
 
     def test_build_notifier_uses_env_overridden_account_name(self) -> None:
@@ -111,16 +121,35 @@ class RuntimeFactoryTests(unittest.TestCase):
   }
 }
 """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "app.json"
-            config_path.write_text(config_text, encoding="utf-8")
-            with patch.dict("os.environ", {"DISCORSAIR_AUTH_NAME": "env-name"}, clear=False):
-                with patch("discorsair.runtime.factory.setup_logging"):
-                    app_config = load_runtime_app_config(str(config_path))
+        app_config, _ = self._load_runtime_app_config(
+            config_text,
+            env={"DISCORSAIR_AUTH_NAME": "env-name"},
+        )
 
         notifier = build_notifier(app_config)
         self.assertIsNotNone(notifier)
         self.assertEqual(notifier._prefix, "[Discorsair][env-name]")
+
+    def test_build_notifier_uses_env_overridden_notify_url(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"name": "file-name", "cookie": "_t=file-token"},
+  "notify": {
+    "enabled": true,
+    "url": "https://file-notify.example",
+    "chat_id": "123"
+  }
+}
+"""
+        app_config, _ = self._load_runtime_app_config(
+            config_text,
+            env={"DISCORSAIR_NOTIFY_URL": "https://env-notify.example"},
+        )
+
+        notifier = build_notifier(app_config)
+        self.assertIsNotNone(notifier)
+        self.assertEqual(notifier._url, "https://env-notify.example")
 
     def test_load_settings_builds_structured_values(self) -> None:
         app_config = {

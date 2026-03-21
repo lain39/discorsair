@@ -53,8 +53,7 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
         api_key=api_key,
         on_action_success=_on_action_success,
     )
-    fatal_error_getter = getattr(controller, "fatal_error", None)
-    fatal_error = fatal_error_getter() if callable(fatal_error_getter) else None
+    fatal_error = controller.fatal_error()
     if fatal_error is not None:
         if not isinstance(fatal_error, DiscourseAuthError):
             context.state.mark_account_fail(fatal_error, mark_invalid=False, disable=False)

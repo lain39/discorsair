@@ -94,65 +94,13 @@ class WatchController:
             restarts = 0
             while True:
                 try:
-                    watch(
-                        self._client,
-                        self._store,
-                        interval_secs=self._interval_secs,
-                        once=False,
-                        max_posts_per_interval=self._max_posts_per_interval,
-                        crawl_enabled=self._crawl_enabled,
-                        use_unseen=self._use_unseen,
-                        timings_per_topic=self._timings_per_topic,
-                        notifier=self._notifier,
-                        notify_interval_secs=self._notify_interval_secs,
-                        on_success=self._tick,
-                        stop_event=stop_event,
-                        schedule_windows=self._schedule_windows if use_schedule else [],
-                        timezone_name=self._timezone_name,
-                    )
-                    return
-                except DiscourseAuthError as exc:
-                    self.handle_auth_invalid(exc, source="watch stopped")
-                    return
-                except ChallengeUnresolvedError as exc:
-                    self.handle_unresolved_challenge(exc, source="watch stopped")
+                    self._run_watch_once(stop_event, use_schedule=use_schedule)
                     return
                 except Exception as exc:  # noqa: BLE001
-                    logging.getLogger(__name__).error("watch thread crashed: %s", exc)
-                    self.report_error(str(exc), f"watch crashed: {exc}")
-                    sig = f"{exc.__class__.__name__}:{exc}"
-                    if sig == self._last_error_sig:
-                        self._same_error_count += 1
-                    else:
-                        self._same_error_count = 1
-                        self._last_error_sig = sig
-                    if self._same_error_stop_threshold > 0 and self._same_error_count >= self._same_error_stop_threshold:
-                        logging.getLogger(__name__).error(
-                            "watch auto-stopped after %s consecutive same errors",
-                            self._same_error_count,
-                        )
-                        if self._notifier:
-                            self._notify_stop(
-                                "same_error_threshold",
-                                detail=str(exc),
-                                extra={"same_error_count": str(self._same_error_count)},
-                            )
-                        self._finalize_stop()
+                    next_restarts = self._handle_watch_exception(exc, restarts)
+                    if next_restarts is None:
                         return
-                    if not self._auto_restart:
-                        self._notify_stop("auto_restart_disabled", detail=str(exc))
-                        self._finalize_stop()
-                        return
-                    restarts += 1
-                    if self._max_restarts > 0 and restarts > self._max_restarts:
-                        self._notify_stop(
-                            "max_restarts_exceeded",
-                            detail=str(exc),
-                            extra={"max_restarts": str(self._max_restarts)},
-                        )
-                        self._finalize_stop()
-                        return
-                    time.sleep(max(self._restart_backoff_secs, 1))
+                    restarts = next_restarts
 
         t = threading.Thread(target=_run, daemon=True)
         self._runtime.thread = t
@@ -212,6 +160,71 @@ class WatchController:
         self._same_error_count = 0
         self._last_error_sig = None
 
+    def _run_watch_once(self, stop_event: threading.Event, *, use_schedule: bool) -> None:
+        watch(
+            self._client,
+            self._store,
+            interval_secs=self._interval_secs,
+            once=False,
+            max_posts_per_interval=self._max_posts_per_interval,
+            crawl_enabled=self._crawl_enabled,
+            use_unseen=self._use_unseen,
+            timings_per_topic=self._timings_per_topic,
+            notifier=self._notifier,
+            notify_interval_secs=self._notify_interval_secs,
+            on_success=self._tick,
+            stop_event=stop_event,
+            schedule_windows=self._schedule_windows if use_schedule else [],
+            timezone_name=self._timezone_name,
+        )
+
+    def _handle_watch_exception(self, exc: Exception, restarts: int) -> int | None:
+        if isinstance(exc, DiscourseAuthError):
+            self.handle_auth_invalid(exc, source="watch stopped")
+            return None
+        if isinstance(exc, ChallengeUnresolvedError):
+            self.handle_unresolved_challenge(exc, source="watch stopped")
+            return None
+
+        logging.getLogger(__name__).error("watch thread crashed: %s", exc)
+        self.report_error(str(exc), f"watch crashed: {exc}")
+        same_error_count = self._record_watch_error_signature(exc)
+        if self._same_error_stop_threshold > 0 and same_error_count >= self._same_error_stop_threshold:
+            logging.getLogger(__name__).error(
+                "watch auto-stopped after %s consecutive same errors",
+                same_error_count,
+            )
+            self._stop_with_type(
+                "same_error_threshold",
+                detail=str(exc),
+                extra={"same_error_count": str(same_error_count)},
+            )
+            return None
+        if not self._auto_restart:
+            self._stop_with_type("auto_restart_disabled", detail=str(exc))
+            return None
+
+        next_restarts = restarts + 1
+        if self._max_restarts > 0 and next_restarts > self._max_restarts:
+            self._stop_with_type(
+                "max_restarts_exceeded",
+                detail=str(exc),
+                extra={"max_restarts": str(self._max_restarts)},
+            )
+            return None
+
+        time.sleep(max(self._restart_backoff_secs, 1))
+        return next_restarts
+
+    def _record_watch_error_signature(self, exc: Exception) -> int:
+        sig = f"{exc.__class__.__name__}:{exc}"
+        if sig == self._last_error_sig:
+            self._same_error_count += 1
+        else:
+            self._same_error_count = 1
+            self._last_error_sig = sig
+        return self._same_error_count
+
     def report_error(self, message: str, notify_message: str | None = None) -> None:
         self._set_runtime_error(message)
         if notify_message and self._notifier:
@@ -239,25 +252,38 @@ class WatchController:
             parts.append(f"detail={detail}")
         self._notifier.send_error(" ".join(parts))
 
+    def _stop_with_type(
+        self,
+        stop_type: str,
+        *,
+        detail: str,
+        extra: dict[str, str] | None = None,
+        notify_fatal: bool = False,
+    ) -> None:
+        self._notify_stop(stop_type, detail=detail, extra=extra)
+        self._finalize_stop()
+        if notify_fatal and self._on_fatal:
+            self._on_fatal()
+
+    def _handle_fatal_stop(self, stop_type: str, exc: Exception, *, source: str, notify_message: str) -> None:
+        self._fatal_error = exc
+        self.report_error(str(exc), notify_message)
+        self._stop_with_type(stop_type, detail=str(exc), extra={"source": source}, notify_fatal=True)
+
     def handle_auth_invalid(self, exc: Exception, *, source: str) -> None:
         logging.getLogger(__name__).error("%s due to auth error: %s", source, exc)
-        self._fatal_error = exc
-        self.report_error(str(exc), f"{source}: auth error: {exc}")
-        self._notify_stop("auth_invalid", detail=str(exc), extra={"source": source})
         if self._on_auth_invalid:
             self._on_auth_invalid(exc)
-        self._finalize_stop()
-        if self._on_fatal:
-            self._on_fatal()
+        self._handle_fatal_stop("auth_invalid", exc, source=source, notify_message=f"{source}: auth error: {exc}")
 
     def handle_unresolved_challenge(self, exc: Exception, *, source: str) -> None:
         logging.getLogger(__name__).error("%s due to unresolved challenge: %s", source, exc)
-        self._fatal_error = exc
-        self.report_error(str(exc), f"{source}: unresolved challenge: {exc}")
-        self._notify_stop("unresolved_challenge", detail=str(exc), extra={"source": source})
-        self._finalize_stop()
-        if self._on_fatal:
-            self._on_fatal()
+        self._handle_fatal_stop(
+            "unresolved_challenge",
+            exc,
+            source=source,
+            notify_message=f"{source}: unresolved challenge: {exc}",
+        )
 
     def _finalize_stop(self) -> None:
         if self._runtime.stop_event:
