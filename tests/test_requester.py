@@ -18,13 +18,17 @@ sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
 from discorsair.core.requester import (
+    ChallengeUnresolvedError,
     Requester,
     _build_flaresolverr_proxy,
+    _build_flaresolverr_proxy_with_mode,
     _extract_csrf_token_from_html,
     _retry_delay_secs,
     _translate_proxy_for_flaresolverr,
+    _translate_proxy_for_flaresolverr_with_mode,
 )
 from discorsair.core.session import SessionState
+from discorsair.discourse.client import DiscourseAuthError
 
 
 class RequesterTests(unittest.TestCase):
@@ -57,6 +61,24 @@ class RequesterTests(unittest.TestCase):
             _build_flaresolverr_proxy(proxy),
             {
                 "url": "http://host.docker.internal:5352",
+                "username": "proxy.user",
+                "password": "p@ss&word",
+            },
+        )
+
+    def test_translate_proxy_keeps_loopback_when_flaresolverr_not_in_docker(self) -> None:
+        proxy = "http://user:pass@127.0.0.1:7890"
+        self.assertEqual(
+            _translate_proxy_for_flaresolverr_with_mode(proxy, running_in_docker=False),
+            "http://127.0.0.1:7890",
+        )
+
+    def test_build_flaresolverr_proxy_keeps_loopback_when_not_in_docker(self) -> None:
+        proxy = "http://proxy.user:p%40ss%26word@127.0.0.1:5352"
+        self.assertEqual(
+            _build_flaresolverr_proxy_with_mode(proxy, running_in_docker=False),
+            {
+                "url": "http://127.0.0.1:5352",
                 "username": "proxy.user",
                 "password": "p@ss&word",
             },
@@ -239,7 +261,9 @@ class RequesterTests(unittest.TestCase):
                 )
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(calls[1]["headers"]["x-csrf-token"], "new-csrf")
+        retry_call = calls[-1]
+        self.assertEqual(retry_call["url"], "https://forum.example/timings")
+        self.assertEqual(retry_call["headers"]["x-csrf-token"], "new-csrf")
         self.assertEqual(requester.get_csrf_token_hint(), "new-csrf")
 
     def test_max_retries_counts_additional_retries(self) -> None:
@@ -366,6 +390,254 @@ class RequesterTests(unittest.TestCase):
                 "password": "p@ss&word",
             },
         )
+
+    def test_flaresolverr_request_keeps_loopback_proxy_when_not_in_docker(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+                proxy="http://proxy.user:p%40ss%26word@127.0.0.1:5352",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            flaresolverr_in_docker=False,
+        )
+
+        class DummyFsResponse:
+            def json(self) -> dict[str, object]:
+                return {"status": "ok", "solution": {"cookies": []}}
+
+        with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()) as post:
+            requester._flaresolverr_request("get", "https://forum.example/latest.json")
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(
+            payload["proxy"],
+            {
+                "url": "http://127.0.0.1:5352",
+                "username": "proxy.user",
+                "password": "p@ss&word",
+            },
+        )
+
+    def test_fetch_csrf_via_flaresolverr_aligns_user_agent(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            flaresolverr_use_base_url_for_csrf=True,
+        )
+
+        class DummyFsResponse:
+            def json(self) -> dict[str, object]:
+                return {
+                    "status": "ok",
+                    "solution": {
+                        "response": '<html><head><meta name="csrf-token" content="csrf-123"></head></html>',
+                        "cookies": [],
+                    },
+                }
+
+        with patch("discorsair.core.requester.get_default_ua", return_value="ua-110"):
+            with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()) as post:
+                token = requester.fetch_csrf_token_via_flaresolverr()
+
+        self.assertEqual(token, "csrf-123")
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["userAgent"], "ua-110")
+        self.assertTrue(requester.last_response_ok())
+
+    def test_fetch_csrf_via_flaresolverr_retries_on_failure(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            flaresolverr_use_base_url_for_csrf=True,
+            max_retries=1,
+        )
+
+        class DummyFsResponse:
+            def json(self) -> dict[str, object]:
+                return {
+                    "status": "ok",
+                    "solution": {
+                        "response": '<html><head><meta name="csrf-token" content="csrf-123"></head></html>',
+                        "cookies": [],
+                    },
+                }
+
+        with patch("discorsair.core.requester.requests.post", side_effect=[RuntimeError("fs down"), DummyFsResponse()]) as post:
+            with patch.object(requester, "_backoff") as backoff:
+                token = requester.fetch_csrf_token_via_flaresolverr()
+
+        self.assertEqual(token, "csrf-123")
+        self.assertEqual(post.call_count, 2)
+        backoff.assert_called_once()
+        self.assertTrue(requester.last_response_ok())
+
+    def test_fetch_csrf_via_flaresolverr_marks_last_response_failed_on_error(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            flaresolverr_use_base_url_for_csrf=True,
+            max_retries=1,
+        )
+
+        with patch("discorsair.core.requester.requests.post", side_effect=RuntimeError("fs down")):
+            with patch.object(requester, "_backoff"):
+                with self.assertRaisesRegex(RuntimeError, "fs down"):
+                    requester.fetch_csrf_token_via_flaresolverr()
+
+        self.assertFalse(requester.last_response_ok())
+
+    def test_fetch_csrf_via_flaresolverr_auth_error_is_not_retried(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            flaresolverr_use_base_url_for_csrf=True,
+            max_retries=3,
+        )
+
+        with patch.object(requester, "_flaresolverr_request", side_effect=DiscourseAuthError("not_logged_in")):
+            with patch.object(requester, "_backoff") as backoff:
+                with self.assertRaises(DiscourseAuthError):
+                    requester.fetch_csrf_token_via_flaresolverr()
+
+        backoff.assert_not_called()
+        self.assertFalse(requester.last_response_ok())
+
+    def test_flaresolverr_cookies_without_csrf_meta_raise_auth_error(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+        )
+
+        class DummyFsResponse:
+            def json(self) -> dict[str, object]:
+                return {
+                    "status": "ok",
+                    "solution": {
+                        "response": "<html><body>ok</body></html>",
+                        "cookies": [{"name": "_forum_session", "value": "abc"}],
+                    },
+                }
+
+        with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()):
+            with self.assertRaises(DiscourseAuthError):
+                requester._solve_challenge()
+
+    def test_challenge_solve_auth_error_is_not_retried(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            max_retries=3,
+        )
+
+        class DummyResponse:
+            def __init__(self) -> None:
+                self.status_code = 403
+                self.text = "<html>Just a moment</html>"
+                self.headers = {"Content-Type": "text/html"}
+                self.cookies = {}
+
+        with patch("discorsair.core.requester.requests.request", return_value=DummyResponse()) as request_call:
+            with patch.object(requester, "_solve_challenge", side_effect=DiscourseAuthError("not_logged_in")):
+                with patch.object(requester, "_backoff") as backoff:
+                    with self.assertRaises(DiscourseAuthError):
+                        requester.request("get", "/latest.json")
+
+        self.assertEqual(request_call.call_count, 1)
+        backoff.assert_not_called()
+        self.assertFalse(requester.last_response_ok())
+
+    def test_challenge_still_present_after_solve_stops_even_with_unlimited_retries(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            max_retries=0,
+        )
+
+        class DummyResponse:
+            def __init__(self, status_code: int, text: str, headers: dict[str, str] | None = None) -> None:
+                self.status_code = status_code
+                self.text = text
+                self.headers = headers or {}
+                self.cookies = {}
+
+        class DummyFsResponse:
+            def json(self) -> dict[str, object]:
+                return {
+                    "status": "ok",
+                    "solution": {
+                        "response": '<html><head><meta name="csrf-token" content="new-csrf"></head></html>',
+                        "cookies": [],
+                    },
+                }
+
+        calls: list[dict[str, object]] = []
+
+        def fake_request(**kwargs):
+            calls.append(kwargs)
+            return DummyResponse(403, "<html>Just a moment</html>", {"Content-Type": "text/html"})
+
+        with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()):
+            with patch("discorsair.core.requester.requests.request", side_effect=fake_request):
+                with patch.object(requester, "_backoff") as backoff:
+                    with self.assertRaisesRegex(ChallengeUnresolvedError, "challenge still present after solve"):
+                        requester.request("post", "/timings", headers={"x-csrf-token": "old-csrf"}, data="topic_id=1")
+
+        self.assertGreaterEqual(len(calls), 4)
+        self.assertEqual(backoff.call_count, 2)
 
 
 if __name__ == "__main__":

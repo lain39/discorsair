@@ -69,6 +69,8 @@ def default_app_config() -> dict[str, Any]:
             "base_url": "http://host.docker.internal:8191",
             "request_timeout_secs": 60,
             "ua_probe_url": "",
+            "use_base_url_for_csrf": False,
+            "in_docker": True,
         },
     }
 

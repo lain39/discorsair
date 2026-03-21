@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from concurrent.futures import TimeoutError
 
+from discorsair.core.requester import ChallengeUnresolvedError
 from discorsair.discourse.client import DiscourseAuthError
 from discorsair.discourse.queued_client import QueuedDiscourseClient
 from discorsair.flows.watch import watch
@@ -52,6 +53,8 @@ class WatchController:
         same_error_stop_threshold: int,
         timezone_name: str,
         on_stop: Callable[[], None] | None = None,
+        on_auth_invalid: Callable[[Exception], None] | None = None,
+        on_fatal: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
         self._store = store
@@ -69,9 +72,12 @@ class WatchController:
         self._same_error_stop_threshold = max(0, int(same_error_stop_threshold))
         self._timezone_name = timezone_name
         self._on_stop = on_stop
+        self._on_auth_invalid = on_auth_invalid
+        self._on_fatal = on_fatal
         self._runtime = WatchRuntime()
         self._last_error_sig: str | None = None
         self._same_error_count = 0
+        self._fatal_error: Exception | None = None
 
     def start(self, use_schedule: bool = True) -> bool:
         if self._runtime.thread and self._runtime.thread.is_alive():
@@ -82,6 +88,7 @@ class WatchController:
         self._runtime.last_tick = _now()
         self._last_error_sig = None
         self._same_error_count = 0
+        self._fatal_error = None
 
         def _run() -> None:
             restarts = 0
@@ -105,10 +112,10 @@ class WatchController:
                     )
                     return
                 except DiscourseAuthError as exc:
-                    logging.getLogger(__name__).error("watch stopped due to auth error: %s", exc)
-                    self.report_error(str(exc), f"watch stopped: auth error: {exc}")
-                    if self._runtime.stop_event:
-                        self._runtime.stop_event.set()
+                    self.handle_auth_invalid(exc, source="watch stopped")
+                    return
+                except ChallengeUnresolvedError as exc:
+                    self.handle_unresolved_challenge(exc, source="watch stopped")
                     return
                 except Exception as exc:  # noqa: BLE001
                     logging.getLogger(__name__).error("watch thread crashed: %s", exc)
@@ -128,17 +135,14 @@ class WatchController:
                             self._notifier.send_error(
                                 f"watch auto-stopped after {self._same_error_count} consecutive same errors: {exc}"
                             )
-                        if self._runtime.stop_event:
-                            self._runtime.stop_event.set()
+                        self._finalize_stop()
                         return
                     if not self._auto_restart:
-                        if self._runtime.stop_event:
-                            self._runtime.stop_event.set()
+                        self._finalize_stop()
                         return
                     restarts += 1
                     if self._max_restarts > 0 and restarts > self._max_restarts:
-                        if self._runtime.stop_event:
-                            self._runtime.stop_event.set()
+                        self._finalize_stop()
                         return
                     time.sleep(max(self._restart_backoff_secs, 1))
 
@@ -171,10 +175,8 @@ class WatchController:
     def stop(self) -> bool:
         if not self._runtime.stop_event:
             return False
-        self._runtime.stop_event.set()
         logging.getLogger(__name__).info("watch stop requested")
-        if self._on_stop:
-            self._on_stop()
+        self._finalize_stop()
         return True
 
     def status(self) -> dict[str, Any]:
@@ -207,9 +209,39 @@ class WatchController:
         if notify_message and self._notifier:
             self._notifier.send_error(notify_message)
 
+    def set_on_fatal(self, callback: Callable[[], None] | None) -> None:
+        self._on_fatal = callback
+
+    def fatal_error(self) -> Exception | None:
+        return self._fatal_error
+
     def _set_runtime_error(self, message: str) -> None:
         self._runtime.last_error = message
         self._runtime.last_error_at = _now()
+
+    def handle_auth_invalid(self, exc: Exception, *, source: str) -> None:
+        logging.getLogger(__name__).error("%s due to auth error: %s", source, exc)
+        self._fatal_error = exc
+        self.report_error(str(exc), f"{source}: auth error: {exc}")
+        if self._on_auth_invalid:
+            self._on_auth_invalid(exc)
+        self._finalize_stop()
+        if self._on_fatal:
+            self._on_fatal()
+
+    def handle_unresolved_challenge(self, exc: Exception, *, source: str) -> None:
+        logging.getLogger(__name__).error("%s due to unresolved challenge: %s", source, exc)
+        self._fatal_error = exc
+        self.report_error(str(exc), f"{source}: unresolved challenge: {exc}")
+        self._finalize_stop()
+        if self._on_fatal:
+            self._on_fatal()
+
+    def _finalize_stop(self) -> None:
+        if self._runtime.stop_event:
+            self._runtime.stop_event.set()
+        if self._on_stop:
+            self._on_stop()
 
 
 def _now() -> str:
@@ -362,6 +394,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                     self._send(400, {"error": "post_id required"})
                     return
                 result = self.server.client.toggle_reaction(post_id, emoji)
+                if self.server.on_action_success:
+                    self.server.on_action_success()
                 self._send(200, {"ok": True, "result": result})
                 return
             if self.path == "/reply":
@@ -373,6 +407,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                     self._send(400, {"error": "topic_id and raw required"})
                     return
                 result = self.server.client.reply(topic_id, raw, category)
+                if self.server.on_action_success:
+                    self.server.on_action_success()
                 self._send(200, {"ok": True, "result": result})
                 return
             self._send(404, {"error": "not found"})
@@ -381,10 +417,13 @@ class ControlHandler(BaseHTTPRequestHandler):
             self.server.watch_controller.report_error("timeout", "http POST timeout")
             self._send(504, {"error": "timeout"})
         except DiscourseAuthError as exc:
-            logging.getLogger(__name__).error("http auth error: %s", exc)
-            self.server.watch_controller.report_error(str(exc), f"http auth error: {exc}")
+            self.server.watch_controller.handle_auth_invalid(exc, source="http auth error")
             self._send(401, {"error": "not_logged_in"})
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            self.server.request_shutdown()
+        except ChallengeUnresolvedError as exc:
+            self.server.watch_controller.handle_unresolved_challenge(exc, source="http unresolved challenge")
+            self._send(503, {"error": "challenge_unresolved"})
+            self.server.request_shutdown()
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).error("http POST error: %s", exc)
             self.server.watch_controller.report_error(str(exc), f"http POST error: {exc}")
@@ -402,11 +441,22 @@ class ControlServer(ThreadingHTTPServer):
         client: QueuedDiscourseClient,
         watch_controller: WatchController,
         api_key: str | None = None,
+        on_action_success: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.client = client
         self.watch_controller = watch_controller
         self.api_key = api_key or ""
+        self.on_action_success = on_action_success
+        self._shutdown_requested = False
+        self._shutdown_lock = threading.Lock()
+
+    def request_shutdown(self) -> None:
+        with self._shutdown_lock:
+            if self._shutdown_requested:
+                return
+            self._shutdown_requested = True
+        threading.Thread(target=self.shutdown, daemon=True).start()
 
 
 def serve(
@@ -415,8 +465,20 @@ def serve(
     client: QueuedDiscourseClient,
     watch_controller: WatchController,
     api_key: str | None = None,
+    on_action_success: Callable[[], None] | None = None,
 ) -> None:
     validate_server_binding(host, api_key)
-    httpd = ControlServer((host, port), ControlHandler, client, watch_controller, api_key=api_key)
+    httpd = ControlServer(
+        (host, port),
+        ControlHandler,
+        client,
+        watch_controller,
+        api_key=api_key,
+        on_action_success=on_action_success,
+    )
+    watch_controller.set_on_fatal(httpd.request_shutdown)
     logging.getLogger(__name__).info("server listening on %s:%s", host, port)
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()

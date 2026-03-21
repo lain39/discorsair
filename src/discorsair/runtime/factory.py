@@ -97,6 +97,8 @@ def build_client(app_config: dict[str, Any]) -> DiscourseClient:
         min_interval_secs=float(req_cfg.get("min_interval_secs", 0)),
         max_retries=int(req_cfg.get("max_retries", 1)),
         timeout_secs=float(site.get("timeout_secs", 30)),
+        flaresolverr_use_base_url_for_csrf=bool(flaresolverr.get("use_base_url_for_csrf", False)),
+        flaresolverr_in_docker=bool(flaresolverr.get("in_docker", True)),
     )
     return DiscourseClient(requester)
 

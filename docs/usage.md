@@ -60,11 +60,15 @@
 - `flaresolverr.enabled=false` 时禁用 FlareSolverr 兜底
 - `flaresolverr.base_url` FlareSolverr 服务地址
 - `flaresolverr.request_timeout_secs` FlareSolverr 请求超时
-- 需提前在 Docker 中部署 FlareSolverr
-- 如果 `auth.proxy` 使用回环地址（如 `http://127.0.0.1:7890`），传给 FlareSolverr 的代理需要转换为 `http://host.docker.internal:7890`
+- `flaresolverr.use_base_url_for_csrf=true` 时，获取 CSRF 会改为用 FlareSolverr 访问 `base_url` 并提取页面里的 `<meta name="csrf-token" ...>`；关闭时仍使用 `/session/csrf`
+- 该路径仍会沿用运行时的 UA 对齐、请求串行化、限流与重试/backoff 逻辑
+- 如果 FlareSolverr 返回了 cookie 但页面里没有可提取的 `csrf-token`，会按登录失效处理
+- `flaresolverr.in_docker=true` 表示 FlareSolverr 运行在 Docker 中；为 `false` 时，传给 FlareSolverr 的代理不会把 `127.0.0.1/localhost` 替换为 `host.docker.internal`
+- 需提前部署 FlareSolverr；如果运行在 Docker 中，`flaresolverr.in_docker` 应保持为 `true`
+- 如果 `auth.proxy` 使用回环地址（如 `http://127.0.0.1:7890`）且 `flaresolverr.in_docker=true`，传给 FlareSolverr 的代理会转换为 `http://host.docker.internal:7890`
 - 如果 `auth.proxy` 包含认证信息，配置里应保持 URL 编码形式；`curl_cffi` 直接使用该 URL，FlareSolverr 会改为 `{"url","username","password"}` 结构并对账号密码做 URL 解码后再发送
 - 该转换由 `src/core/` 处理
-- 过盾时会使用 FlareSolverr 访问 `base_url`；如果返回 HTML 含 `<meta name="csrf-token" ...>`，运行时会提取该 token，并用于本次重试及后续请求的 CSRF 同步
+- 过盾时也会使用 FlareSolverr 访问 `base_url`；如果返回 HTML 含 `<meta name="csrf-token" ...>`，运行时会提取该 token，并用于本次重试及后续请求的 CSRF 同步
 - `cf_clearance` 可按代理 IP 做本地缓存，下次同 IP 先尝试复用
 - 运行时仅在成功请求后才会把最新 `_t` 写回 `auth.cookie`；其他 cookie 不会持久化到配置，空 `_t` 或未变化的值也不会覆盖配置
 

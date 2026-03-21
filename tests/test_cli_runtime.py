@@ -22,6 +22,8 @@ sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
 from discorsair.cli import main
+from discorsair.discourse.client import DiscourseAuthError
+from discorsair.core.requester import ChallengeUnresolvedError
 from discorsair.runtime.commands import RuntimeCommandContext, handle_notify_test, handle_authenticated_command
 from discorsair.runtime.state import RuntimeStateStore
 from discorsair.runtime.settings import RuntimeSettings, StoreSettings, WatchSettings, ServerSettings
@@ -135,6 +137,87 @@ class CliRuntimeTests(unittest.TestCase):
         like_fn.assert_called_once_with(services.client, post_id=7, emoji="heart")
         state.mark_account_ok.assert_called_once_with()
         state.save_cookies.assert_called_once_with(services.base_client)
+
+    def test_handle_authenticated_serve_wires_stop_and_auth_invalid_callbacks(self) -> None:
+        state = Mock()
+        services = types.SimpleNamespace(client=object(), base_client=object(), store=object())
+        args = types.SimpleNamespace(command="serve", host=None, port=None)
+        context = RuntimeCommandContext(
+            settings=self._settings(),
+            state=state,
+            notifier=None,
+            services=services,
+        )
+        controller = Mock()
+        controller.fatal_error.return_value = None
+
+        with patch("discorsair.runtime.commands.serve.WatchController", return_value=controller) as controller_cls:
+            with patch("discorsair.runtime.commands.serve.serve") as serve_fn:
+                outcome = handle_authenticated_command(args, context)
+
+        self.assertEqual(outcome.exit_code, 0)
+        controller_kwargs = controller_cls.call_args.kwargs
+        serve_kwargs = serve_fn.call_args.kwargs
+        controller_kwargs["on_stop"]()
+        controller_kwargs["on_auth_invalid"](RuntimeError("not_logged_in"))
+        serve_kwargs["on_action_success"]()
+        self.assertEqual(state.mark_account_ok.call_count, 1)
+        self.assertEqual(state.mark_account_fail.call_count, 1)
+        self.assertEqual(state.save_cookies.call_count, 2)
+        self.assertEqual(state.save_cookies.call_args_list[0].args, (services.base_client,))
+        self.assertEqual(state.save_cookies.call_args_list[1].args, (services.base_client,))
+        mark_args, mark_kwargs = state.mark_account_fail.call_args
+        self.assertEqual(str(mark_args[0]), "not_logged_in")
+        self.assertEqual(mark_kwargs, {"mark_invalid": True, "disable": True})
+        serve_fn.assert_called_once_with(
+            host="127.0.0.1",
+            port=8080,
+            client=services.client,
+            watch_controller=controller,
+            api_key="",
+            on_action_success=serve_kwargs["on_action_success"],
+        )
+
+    def test_handle_authenticated_serve_returns_nonzero_on_auth_fatal(self) -> None:
+        state = Mock()
+        services = types.SimpleNamespace(client=object(), base_client=object(), store=object())
+        args = types.SimpleNamespace(command="serve", host=None, port=None)
+        context = RuntimeCommandContext(
+            settings=self._settings(),
+            state=state,
+            notifier=None,
+            services=services,
+        )
+        controller = Mock()
+        controller.fatal_error.return_value = DiscourseAuthError("not_logged_in")
+
+        with patch("discorsair.runtime.commands.serve.WatchController", return_value=controller):
+            with patch("discorsair.runtime.commands.serve.serve"):
+                outcome = handle_authenticated_command(args, context)
+
+        self.assertEqual(outcome.exit_code, 1)
+        state.mark_account_fail.assert_not_called()
+
+    def test_handle_authenticated_serve_marks_fail_on_unresolved_challenge_fatal(self) -> None:
+        state = Mock()
+        services = types.SimpleNamespace(client=object(), base_client=object(), store=object())
+        args = types.SimpleNamespace(command="serve", host=None, port=None)
+        context = RuntimeCommandContext(
+            settings=self._settings(),
+            state=state,
+            notifier=None,
+            services=services,
+        )
+        controller = Mock()
+        exc = ChallengeUnresolvedError("challenge still present after solve")
+        controller.fatal_error.return_value = exc
+
+        with patch("discorsair.runtime.commands.serve.WatchController", return_value=controller):
+            with patch("discorsair.runtime.commands.serve.serve"):
+                outcome = handle_authenticated_command(args, context)
+
+        self.assertEqual(outcome.exit_code, 1)
+        state.mark_account_fail.assert_called_once_with(exc, mark_invalid=False, disable=False)
 
 
 if __name__ == "__main__":

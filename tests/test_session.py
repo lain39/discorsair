@@ -6,7 +6,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -20,6 +20,7 @@ sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions
 from discorsair.discourse.client import DiscourseAuthError
 from discorsair.discourse.client import DiscourseClient
 from discorsair.flows.watch import _poll_notifications
+from discorsair.core.requester import ChallengeUnresolvedError
 from discorsair.server.http_server import WatchController, validate_server_binding
 
 
@@ -88,6 +89,8 @@ class _Requester:
         self._responses = list(responses)
         self.calls: list[tuple[tuple, dict]] = []
         self._csrf_token_hint = ""
+        self._use_flaresolverr_for_csrf = False
+        self._flaresolverr_csrf_token = ""
 
     def request(self, *args, **kwargs):
         self.calls.append((args, kwargs))
@@ -107,6 +110,12 @@ class _Requester:
         self._csrf_token_hint = ""
         return hint
 
+    def should_use_flaresolverr_for_csrf(self) -> bool:
+        return self._use_flaresolverr_for_csrf
+
+    def fetch_csrf_token_via_flaresolverr(self) -> str:
+        return self._flaresolverr_csrf_token
+
 
 class WatchAndServerTests(unittest.TestCase):
     def test_validate_server_binding_requires_api_key_for_public_host(self) -> None:
@@ -116,6 +125,9 @@ class WatchAndServerTests(unittest.TestCase):
         validate_server_binding("0.0.0.0", "secret")
 
     def test_watch_controller_does_not_restart_on_auth_error(self) -> None:
+        on_stop = Mock()
+        on_auth_invalid = Mock()
+        on_fatal = Mock()
         controller = WatchController(
             client=_DummyClient(),
             store=_DummyStore(),
@@ -132,6 +144,9 @@ class WatchAndServerTests(unittest.TestCase):
             max_restarts=0,
             same_error_stop_threshold=0,
             timezone_name="UTC",
+            on_stop=on_stop,
+            on_auth_invalid=on_auth_invalid,
+            on_fatal=on_fatal,
         )
 
         calls: list[int] = []
@@ -147,9 +162,95 @@ class WatchAndServerTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(controller.status()["last_error"], "not_logged_in")
+        self.assertIsInstance(controller.fatal_error(), DiscourseAuthError)
         self.assertFalse(controller.status()["running"])
         self.assertIsNotNone(controller._runtime.stop_event)
         self.assertTrue(controller._runtime.stop_event.is_set())
+        on_stop.assert_called_once_with()
+        on_auth_invalid.assert_called_once()
+        on_fatal.assert_called_once_with()
+
+    def test_watch_controller_does_not_restart_on_unresolved_challenge(self) -> None:
+        on_stop = Mock()
+        on_fatal = Mock()
+        controller = WatchController(
+            client=_DummyClient(),
+            store=_DummyStore(),
+            notifier=None,
+            interval_secs=1,
+            max_posts_per_interval=None,
+            crawl_enabled=True,
+            use_unseen=False,
+            timings_per_topic=5,
+            schedule_windows=[],
+            notify_interval_secs=60,
+            auto_restart=True,
+            restart_backoff_secs=1,
+            max_restarts=0,
+            same_error_stop_threshold=0,
+            timezone_name="UTC",
+            on_stop=on_stop,
+            on_fatal=on_fatal,
+        )
+
+        calls: list[int] = []
+
+        def raise_unresolved_challenge(*args, **kwargs) -> None:
+            calls.append(1)
+            raise ChallengeUnresolvedError("challenge still present after solve")
+
+        with patch("discorsair.server.http_server.watch", side_effect=raise_unresolved_challenge):
+            started = controller.start(use_schedule=False)
+            self.assertTrue(started)
+            controller._runtime.thread.join(timeout=2)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(controller.status()["last_error"], "challenge still present after solve")
+        self.assertIsInstance(controller.fatal_error(), ChallengeUnresolvedError)
+        self.assertFalse(controller.status()["running"])
+        self.assertIsNotNone(controller._runtime.stop_event)
+        self.assertTrue(controller._runtime.stop_event.is_set())
+        on_stop.assert_called_once_with()
+        on_fatal.assert_called_once_with()
+
+    def test_watch_controller_runs_on_stop_when_same_error_threshold_hits(self) -> None:
+        on_stop = Mock()
+        controller = WatchController(
+            client=_DummyClient(),
+            store=_DummyStore(),
+            notifier=None,
+            interval_secs=1,
+            max_posts_per_interval=None,
+            crawl_enabled=True,
+            use_unseen=False,
+            timings_per_topic=5,
+            schedule_windows=[],
+            notify_interval_secs=60,
+            auto_restart=True,
+            restart_backoff_secs=1,
+            max_restarts=0,
+            same_error_stop_threshold=2,
+            timezone_name="UTC",
+            on_stop=on_stop,
+        )
+
+        calls: list[int] = []
+
+        def raise_runtime_error(*args, **kwargs) -> None:
+            calls.append(1)
+            raise RuntimeError("boom")
+
+        with patch("discorsair.server.http_server.watch", side_effect=raise_runtime_error):
+            started = controller.start(use_schedule=False)
+            self.assertTrue(started)
+            controller._runtime.thread.join(timeout=2)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(controller.status()["last_error"], "boom")
+        self.assertFalse(controller.status()["running"])
+        self.assertIsNotNone(controller._runtime.stop_event)
+        self.assertTrue(controller._runtime.stop_event.is_set())
+        on_stop.assert_called_once_with()
 
     def test_poll_notifications_marks_only_successful_sends(self) -> None:
         store = _RecordingStore()
@@ -194,6 +295,17 @@ class WatchAndServerTests(unittest.TestCase):
         self.assertEqual(token, "fresh")
         self.assertEqual(len(requester.calls), 1)
         self.assertEqual(requester.calls[0][0][1], "/session/csrf")
+
+    def test_get_csrf_uses_flaresolverr_base_url_when_enabled(self) -> None:
+        requester = _Requester([])
+        requester._use_flaresolverr_for_csrf = True
+        requester._flaresolverr_csrf_token = "fs-csrf"
+        client = DiscourseClient(requester=requester, csrf_token="")
+
+        token = client.get_csrf()
+
+        self.assertEqual(token, "fs-csrf")
+        self.assertEqual(requester.calls, [])
 
     def test_get_latest_uses_requester_csrf_hint(self) -> None:
         requester = _Requester([_Response(200, '{"topic_list": {}}')])

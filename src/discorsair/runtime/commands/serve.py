@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import logging
 
+from discorsair.discourse.client import DiscourseAuthError
 from discorsair.server.http_server import WatchController, serve, validate_server_binding
+from ..types import CommandOutcome
 from .context import RuntimeCommandContext
 
 
-def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContext) -> None:
+def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContext) -> CommandOutcome:
     if context.services is None:
         raise ValueError("services are required for serve command")
     server = context.settings.server
@@ -19,6 +21,11 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
     api_key = server.api_key
     validate_server_binding(host, api_key)
     logging.getLogger(__name__).info("serve: host=%s port=%s schedule=%s", host, port, schedule)
+
+    def _on_action_success() -> None:
+        context.state.mark_account_ok()
+        context.state.save_cookies(context.services.base_client)
+
     controller = WatchController(
         client=context.services.client,
         store=context.services.store,
@@ -36,5 +43,20 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
         max_restarts=server.max_restarts,
         same_error_stop_threshold=server.same_error_stop_threshold,
         on_stop=lambda: context.state.save_cookies(context.services.base_client),
+        on_auth_invalid=lambda exc: context.state.mark_account_fail(exc, mark_invalid=True, disable=True),
     )
-    serve(host=host, port=port, client=context.services.client, watch_controller=controller, api_key=api_key)
+    serve(
+        host=host,
+        port=port,
+        client=context.services.client,
+        watch_controller=controller,
+        api_key=api_key,
+        on_action_success=_on_action_success,
+    )
+    fatal_error_getter = getattr(controller, "fatal_error", None)
+    fatal_error = fatal_error_getter() if callable(fatal_error_getter) else None
+    if fatal_error is not None:
+        if not isinstance(fatal_error, DiscourseAuthError):
+            context.state.mark_account_fail(fatal_error, mark_invalid=False, disable=False)
+        return CommandOutcome(exit_code=1)
+    return CommandOutcome(exit_code=0)

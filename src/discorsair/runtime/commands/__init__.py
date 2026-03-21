@@ -22,6 +22,5 @@ def handle_authenticated_command(args: argparse.Namespace, context: RuntimeComma
     if args.command in {"daily", "like", "reply"}:
         return handle_action_command(args, context)
     if args.command == "serve":
-        handle_serve_command(args, context)
-        return CommandOutcome(exit_code=0)
+        return handle_serve_command(args, context)
     raise ValueError(f"unsupported command: {args.command}")

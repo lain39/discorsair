@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import http.client
 import io
+import socket
 import sys
 import tempfile
 import threading
@@ -12,6 +14,7 @@ import types
 import unittest
 from concurrent.futures import TimeoutError
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -23,7 +26,9 @@ sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
 from discorsair.core.request_queue import RequestQueue
-from discorsair.server.http_server import ControlHandler
+from discorsair.core.requester import ChallengeUnresolvedError
+from discorsair.discourse.client import DiscourseAuthError
+from discorsair.server.http_server import ControlHandler, ControlServer, serve
 from discorsair.storage.sqlite_store import SQLiteStore
 
 
@@ -136,6 +141,9 @@ class _DummyWatchController:
         self._max_posts_per_interval = 200
         self.start_calls: list[bool] = []
         self.stop_calls = 0
+        self.auth_invalid_calls: list[tuple[str, str]] = []
+        self.unresolved_challenge_calls: list[tuple[str, str]] = []
+        self.fatal_callback = None
 
     def status(self) -> dict[str, object]:
         return {"running": False, "stats_total": {}, "stats_today": {}}
@@ -147,6 +155,14 @@ class _DummyWatchController:
     def stop(self) -> bool:
         self.stop_calls += 1
         return True
+
+    def handle_auth_invalid(self, exc: Exception, *, source: str) -> None:
+        self.auth_invalid_calls.append((source, str(exc)))
+        self.stop()
+
+    def handle_unresolved_challenge(self, exc: Exception, *, source: str) -> None:
+        self.unresolved_challenge_calls.append((source, str(exc)))
+        self.stop()
 
     def configure(
         self,
@@ -174,17 +190,26 @@ class _DummyWatchController:
         self._runtime.last_error = message
         self._runtime.last_error_at = "now"
 
+    def set_on_fatal(self, callback) -> None:
+        self.fatal_callback = callback
+
 
 class _DummyClient:
     def __init__(self) -> None:
         self.reactions: list[tuple[int, str]] = []
         self.replies: list[tuple[int, str, int | None]] = []
+        self.reaction_error: Exception | None = None
+        self.reply_error: Exception | None = None
 
     def toggle_reaction(self, post_id: int, emoji: str) -> dict[str, object]:
+        if self.reaction_error is not None:
+            raise self.reaction_error
         self.reactions.append((post_id, emoji))
         return {"post_id": post_id, "emoji": emoji}
 
     def reply(self, topic_id: int, raw: str, category: int | None = None) -> dict[str, object]:
+        if self.reply_error is not None:
+            raise self.reply_error
         self.replies.append((topic_id, raw, category))
         return {"topic_id": topic_id, "raw": raw, "category": category}
 
@@ -196,6 +221,11 @@ class ControlHandlerTests(unittest.TestCase):
         path: str,
         body: dict[str, object] | None = None,
         headers: dict[str, str] | None = None,
+        *,
+        client: _DummyClient | None = None,
+        watch_controller: _DummyWatchController | None = None,
+        shutdown: Mock | None = None,
+        on_action_success: Mock | None = None,
     ) -> tuple[int, dict[str, object]]:
         handler = object.__new__(ControlHandler)
         request_headers = dict(headers or {})
@@ -207,11 +237,14 @@ class ControlHandlerTests(unittest.TestCase):
         handler.headers = request_headers
         handler.path = path
         handler.rfile = io.BytesIO(payload.encode("utf-8"))
+        watch = watch_controller or _DummyWatchController()
         handler.server = types.SimpleNamespace(
             api_key="secret",
-            client=_DummyClient(),
-            watch_controller=_DummyWatchController(),
-            shutdown=lambda: None,
+            client=client or _DummyClient(),
+            watch_controller=watch,
+            shutdown=shutdown or (lambda: None),
+            request_shutdown=shutdown or (lambda: None),
+            on_action_success=on_action_success,
         )
         captured: list[tuple[int, dict[str, object]]] = []
         handler._send = lambda code, data: captured.append((code, data))  # type: ignore[method-assign]
@@ -274,16 +307,186 @@ class ControlHandlerTests(unittest.TestCase):
         self.assertEqual(data, {"error": "topic_id and raw required"})
 
     def test_reply_success_returns_payload(self) -> None:
+        on_action_success = Mock()
         (status, data), server = self._run_handler(
             "POST",
             "/reply",
             body={"topic_id": 9, "raw": "hello", "category": 3},
             headers={"X-API-Key": "secret"},
+            on_action_success=on_action_success,
         )
         self.assertEqual(status, 200)
         self.assertEqual(data["ok"], True)
         self.assertEqual(data["result"]["topic_id"], 9)
         self.assertEqual(server.client.replies, [(9, "hello", 3)])
+        on_action_success.assert_called_once_with()
+
+    def test_like_auth_error_stops_watch_and_shuts_down_server(self) -> None:
+        client = _DummyClient()
+        client.reaction_error = DiscourseAuthError("not_logged_in")
+        shutdown = Mock()
+        watch_controller = _DummyWatchController()
+
+        with patch(
+            "discorsair.server.http_server.threading.Thread",
+            side_effect=lambda *args, **kwargs: types.SimpleNamespace(start=lambda: kwargs["target"]()),
+        ):
+            (status, data), server = self._run_handler(
+                "POST",
+                "/like",
+                body={"post_id": 7},
+                headers={"X-API-Key": "secret"},
+                client=client,
+                watch_controller=watch_controller,
+                shutdown=shutdown,
+            )
+
+        self.assertEqual(status, 401)
+        self.assertEqual(data, {"error": "not_logged_in"})
+        self.assertEqual(server.watch_controller.stop_calls, 1)
+        self.assertEqual(server.watch_controller.auth_invalid_calls, [("http auth error", "not_logged_in")])
+        shutdown.assert_called_once_with()
+
+    def test_reply_challenge_error_stops_watch_and_shuts_down_server(self) -> None:
+        client = _DummyClient()
+        client.reply_error = ChallengeUnresolvedError("challenge still present after solve")
+        shutdown = Mock()
+        watch_controller = _DummyWatchController()
+
+        with patch(
+            "discorsair.server.http_server.threading.Thread",
+            side_effect=lambda *args, **kwargs: types.SimpleNamespace(start=lambda: kwargs["target"]()),
+        ):
+            (status, data), server = self._run_handler(
+                "POST",
+                "/reply",
+                body={"topic_id": 9, "raw": "hello"},
+                headers={"X-API-Key": "secret"},
+                client=client,
+                watch_controller=watch_controller,
+                shutdown=shutdown,
+            )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(data, {"error": "challenge_unresolved"})
+        self.assertEqual(server.watch_controller.stop_calls, 1)
+        self.assertEqual(
+            server.watch_controller.unresolved_challenge_calls,
+            [("http unresolved challenge", "challenge still present after solve")],
+        )
+        shutdown.assert_called_once_with()
+
+    def test_serve_wires_watch_controller_fatal_shutdown_callback(self) -> None:
+        controller = Mock()
+        httpd = Mock()
+
+        with patch("discorsair.server.http_server.ControlServer", return_value=httpd):
+            serve(
+                host="127.0.0.1",
+                port=8080,
+                client=Mock(),
+                watch_controller=controller,
+                api_key="",
+                on_action_success=Mock(),
+            )
+
+        controller.set_on_fatal.assert_called_once_with(httpd.request_shutdown)
+        httpd.serve_forever.assert_called_once_with()
+
+
+class ControlServerIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+        except PermissionError as exc:
+            raise unittest.SkipTest(f"localhost bind not permitted: {exc}") from exc
+
+    def _request_json(
+        self,
+        port: int,
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, object]]:
+        payload = json.dumps(body) if body is not None else None
+        request_headers = dict(headers or {})
+        if payload is not None:
+            request_headers.setdefault("Content-Type", "application/json")
+        deadline = time.monotonic() + 2
+        while True:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+            try:
+                conn.request(method, path, body=payload, headers=request_headers)
+                resp = conn.getresponse()
+                data = json.loads(resp.read().decode("utf-8"))
+                return resp.status, data
+            except (ConnectionRefusedError, ConnectionResetError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+            finally:
+                conn.close()
+
+    def test_control_server_request_shutdown_stops_serve_forever(self) -> None:
+        server = ControlServer(
+            ("127.0.0.1", 0),
+            ControlHandler,
+            _DummyClient(),
+            _DummyWatchController(),
+            api_key="secret",
+        )
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            self._request_json(server.server_address[1], "GET", "/watch/status", headers={"X-API-Key": "secret"})
+            server.request_shutdown()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        finally:
+            if thread.is_alive():
+                server.request_shutdown()
+                thread.join(timeout=2)
+            server.server_close()
+
+    def test_real_http_reply_challenge_error_stops_server(self) -> None:
+        client = _DummyClient()
+        client.reply_error = ChallengeUnresolvedError("challenge still present after solve")
+        watch_controller = _DummyWatchController()
+        server = ControlServer(
+            ("127.0.0.1", 0),
+            ControlHandler,
+            client,
+            watch_controller,
+            api_key="secret",
+        )
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            status, data = self._request_json(
+                server.server_address[1],
+                "POST",
+                "/reply",
+                body={"topic_id": 9, "raw": "hello"},
+                headers={"X-API-Key": "secret"},
+            )
+            self.assertEqual(status, 503)
+            self.assertEqual(data, {"error": "challenge_unresolved"})
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(watch_controller.stop_calls, 1)
+            self.assertEqual(
+                watch_controller.unresolved_challenge_calls,
+                [("http unresolved challenge", "challenge still present after solve")],
+            )
+        finally:
+            if thread.is_alive():
+                server.request_shutdown()
+                thread.join(timeout=2)
+            server.server_close()
 
 
 if __name__ == "__main__":

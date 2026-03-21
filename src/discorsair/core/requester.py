@@ -47,6 +47,11 @@ _CSRF_META_RE = re.compile(
     re.IGNORECASE,
 )
 _MAX_RETRY_DELAY_SECS = 300
+_MAX_CHALLENGE_STILL_PRESENT_ATTEMPTS = 3
+
+
+class ChallengeUnresolvedError(RuntimeError):
+    """Raised when Cloudflare is still blocking API traffic after a solve attempt."""
 
 
 def _normalize_header_key(name: str) -> str:
@@ -144,11 +149,17 @@ def _proxy_key(proxy: str | None) -> str:
 
 
 def _translate_proxy_for_flaresolverr(proxy: str | None) -> str | None:
+    return _translate_proxy_for_flaresolverr_with_mode(proxy, running_in_docker=True)
+
+
+def _translate_proxy_for_flaresolverr_with_mode(proxy: str | None, *, running_in_docker: bool) -> str | None:
     if not proxy:
         return None
     parsed = urlparse(proxy)
     host = parsed.hostname or ""
-    translated_host = "host.docker.internal" if host in {"127.0.0.1", "localhost", "0.0.0.0"} else host
+    translated_host = host
+    if running_in_docker and host in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        translated_host = "host.docker.internal"
     if not translated_host:
         return proxy
     port = f":{parsed.port}" if parsed.port else ""
@@ -157,7 +168,11 @@ def _translate_proxy_for_flaresolverr(proxy: str | None) -> str | None:
 
 
 def _build_flaresolverr_proxy(proxy: str | None) -> Dict[str, str] | None:
-    translated_url = _translate_proxy_for_flaresolverr(proxy)
+    return _build_flaresolverr_proxy_with_mode(proxy, running_in_docker=True)
+
+
+def _build_flaresolverr_proxy_with_mode(proxy: str | None, *, running_in_docker: bool) -> Dict[str, str] | None:
+    translated_url = _translate_proxy_for_flaresolverr_with_mode(proxy, running_in_docker=running_in_docker)
     if not translated_url:
         return None
 
@@ -205,6 +220,8 @@ class Requester:
         min_interval_secs: float = 0.0,
         max_retries: int = 1,
         timeout_secs: float = 30,
+        flaresolverr_use_base_url_for_csrf: bool = False,
+        flaresolverr_in_docker: bool = True,
     ):
         self._session = session
         self._flaresolverr_base_url = flaresolverr_base_url
@@ -214,6 +231,8 @@ class Requester:
         self._min_interval_secs = max(float(min_interval_secs), 0.0)
         self._max_retries = max(int(max_retries), 0)
         self._timeout_secs = max(float(timeout_secs), 1.0)
+        self._flaresolverr_use_base_url_for_csrf = bool(flaresolverr_use_base_url_for_csrf)
+        self._flaresolverr_in_docker = bool(flaresolverr_in_docker)
         self._lock = threading.Lock()
         self._csrf_token_hint = ""
         if not self._session.cookies:
@@ -278,6 +297,7 @@ class Requester:
         response: ResponseData | None = None
         with self._lock:
             attempt = 0
+            challenge_still_present_count = 0
             while True:
                 self._throttle()
 
@@ -370,6 +390,8 @@ class Requester:
                         )
                     except Exception as exc:  # noqa: BLE001
                         self._session.last_response_ok = False
+                        if _is_auth_error(exc):
+                            raise
                         if not self._can_retry(attempt):
                             raise
                         _LOG.warning(
@@ -386,9 +408,14 @@ class Requester:
                         _LOG.debug("retry headers: %s", _redact_headers(response.headers))
                         _LOG.debug("retry body (first 500 chars): %s", response.text[:500])
                     if _is_cloudflare_challenge(response.status, response.headers, response.text):
+                        # A successful solve can still leave the API behind active CF risk controls.
+                        # Treat that as "challenge unresolved", not as an auth problem.
                         self._session.last_response_ok = False
+                        challenge_still_present_count += 1
+                        if challenge_still_present_count >= _MAX_CHALLENGE_STILL_PRESENT_ATTEMPTS:
+                            raise ChallengeUnresolvedError("challenge still present after solve")
                         if not self._can_retry(attempt):
-                            return response
+                            raise ChallengeUnresolvedError("challenge still present after solve")
                         _LOG.warning("challenge still present after solve")
                         self._backoff(attempt)
                         attempt += 1
@@ -407,6 +434,7 @@ class Requester:
                     self._backoff(attempt)
                     attempt += 1
                     continue
+                challenge_still_present_count = 0
                 self._session.last_response_ok = response.status < 400
                 return response
 
@@ -472,6 +500,56 @@ class Requester:
         self._csrf_token_hint = ""
         return hint
 
+    def should_use_flaresolverr_for_csrf(self) -> bool:
+        return bool(self._flaresolverr_base_url and self._flaresolverr_use_base_url_for_csrf)
+
+    def fetch_csrf_token_via_flaresolverr(self) -> str:
+        base = self._session.base_url
+        if not base:
+            raise RuntimeError("base_url is required to fetch csrf via FlareSolverr")
+        with self._lock:
+            attempt = 0
+            while True:
+                self._throttle()
+                user_agent = self._ensure_user_agent(self._ua_probe_url)
+                impersonate_target = self._ensure_impersonate_target(user_agent)
+                if self._debug and user_agent:
+                    if impersonate_target:
+                        _LOG.debug(
+                            "csrf fetch aligned runtime identity: user_agent=%s impersonate_target=%s",
+                            user_agent,
+                            impersonate_target,
+                        )
+                    else:
+                        _LOG.warning(
+                            "csrf fetch could not align impersonate target: user_agent=%s impersonate_target=%s",
+                            user_agent,
+                            self._session.impersonate_target,
+                        )
+                _LOG.info("request: fetching csrf via FlareSolverr base_url")
+                try:
+                    self._flaresolverr_request("get", base)
+                    token = self.consume_csrf_token_hint()
+                    if token:
+                        self._session.last_response_ok = True
+                        return token
+                    self._session.last_response_ok = False
+                    raise RuntimeError("FlareSolverr did not return csrf token from base_url")
+                except Exception as exc:  # noqa: BLE001
+                    self._session.last_response_ok = False
+                    if _is_auth_error(exc):
+                        raise
+                    if not self._can_retry(attempt):
+                        raise
+                    _LOG.warning(
+                        "csrf fetch via FlareSolverr failed (%s/%s): %s",
+                        attempt + 1,
+                        self._attempt_limit_label(),
+                        exc,
+                    )
+                    self._backoff(attempt)
+                    attempt += 1
+
     def last_response_ok(self) -> bool | None:
         return self._session.last_response_ok
 
@@ -496,7 +574,10 @@ class Requester:
         if not self._flaresolverr_base_url:
             raise RuntimeError("FlareSolverr not configured")
 
-        flaresolverr_proxy = _build_flaresolverr_proxy(self._session.proxy)
+        flaresolverr_proxy = _build_flaresolverr_proxy_with_mode(
+            self._session.proxy,
+            running_in_docker=self._flaresolverr_in_docker,
+        )
 
         payload: Dict[str, Any] = {
             "cmd": f"request.{method.lower()}",
@@ -515,7 +596,7 @@ class Requester:
             payload["userAgent"] = self._session.user_agent
 
         fs_url = urljoin(self._flaresolverr_base_url.rstrip("/") + "/", "v1")
-        _LOG.info("request: %s via FlareSolverr", fs_url)
+        _LOG.info("request: %s %s via FlareSolverr", method.upper(), payload["url"])
         if self._debug:
             _LOG.debug("flaresolverr payload (redacted): %s", _redact_headers(payload))
         fs_resp = requests.post(fs_url, json=payload, timeout=self._flaresolverr_timeout_secs)
@@ -543,9 +624,14 @@ class Requester:
         if csrf_token:
             self._csrf_token_hint = csrf_token
             _LOG.info("flaresolverr extracted csrf token: %s", _mask_secret(csrf_token))
+        cookies_list = solution.get("cookies", [])
+        if include_cookies and persist_solution_cookies and cookies_list and not csrf_token:
+            # In this project, FlareSolverr status=ok means the page load itself succeeded.
+            # If that real page still has no csrf meta but does set cookies, treat it as a
+            # logged-out/invalid-account page instead of another unresolved CF challenge.
+            raise _build_login_invalid_error("not_logged_in")
         if not persist_solution_cookies:
             return solution
-        cookies_list = solution.get("cookies", [])
         merged = dict(self._session.cookies)
         for item in cookies_list:
             name = item.get("name")
@@ -598,3 +684,15 @@ def _extract_csrf_token_from_html(html: str) -> str:
     if not match:
         return ""
     return match.group(1).strip()
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    from discorsair.discourse.client import DiscourseAuthError
+
+    return isinstance(exc, DiscourseAuthError)
+
+
+def _build_login_invalid_error(message: str):
+    from discorsair.discourse.client import DiscourseAuthError
+
+    return DiscourseAuthError(message)

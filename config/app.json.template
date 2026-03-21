@@ -103,6 +103,10 @@
     "enabled": true,
     "base_url": "http://host.docker.internal:8191",
     "request_timeout_secs": 60,
+    // 为 true 时，使用 FlareSolverr 访问 base_url 提取页面里的 csrf-token，而不是请求 /session/csrf
+    "use_base_url_for_csrf": false,
+    // FlareSolverr 是否运行在 Docker 中；为 false 时不会把 127.0.0.1 替换成 host.docker.internal
+    "in_docker": true,
     // 可留空；为空时默认使用 data:, 仅探测 userAgent
     "ua_probe_url": ""
   }

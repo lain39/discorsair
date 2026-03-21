@@ -95,6 +95,10 @@ class DiscourseClient:
         if self._csrf_token and not force_refresh:
             logging.getLogger(__name__).info("discourse: get_csrf using cached token")
             return self._csrf_token
+        if getattr(self._requester, "should_use_flaresolverr_for_csrf", lambda: False)():
+            logging.getLogger(__name__).info("discourse: get_csrf via FlareSolverr base_url")
+            self._csrf_token = self._requester.fetch_csrf_token_via_flaresolverr()
+            return self._csrf_token or ""
         if force_refresh:
             logging.getLogger(__name__).info("discourse: get_csrf force refresh")
         logging.getLogger(__name__).info("discourse: get_csrf")
