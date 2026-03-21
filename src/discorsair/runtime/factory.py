@@ -84,7 +84,7 @@ def build_client(app_config: dict[str, Any]) -> DiscourseClient:
     session = SessionState(
         base_url=site.get("base_url", "").rstrip("/"),
         cookie_header=auth.get("cookie", ""),
-        impersonate_target=req_cfg.get("impersonate_target", "chrome110"),
+        impersonate_target=req_cfg.get("impersonate_target") or "",
         user_agent=req_cfg.get("user_agent", ""),
         proxy=auth.get("proxy") or None,
     )

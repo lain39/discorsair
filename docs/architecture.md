@@ -46,7 +46,7 @@
 - 文件：`src/discorsair/runtime/state.py`
 - 职责：
   - 写回账号状态
-  - 在成功请求后保存非空且有变化的 cookie
+  - 在成功请求后仅保存非空且有变化的 `_t`
   - 落盘配置文件
 
 ### 6. Runtime 命令执行

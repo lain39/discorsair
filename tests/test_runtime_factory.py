@@ -19,7 +19,7 @@ sys.modules.setdefault("curl_cffi", types.SimpleNamespace(requests=fake_requests
 sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
-from discorsair.runtime.factory import build_notifier, build_services, load_runtime_app_config, load_settings, resolve_storage_path
+from discorsair.runtime.factory import build_client, build_notifier, build_services, load_runtime_app_config, load_settings, resolve_storage_path
 from discorsair.runtime.settings import RuntimeSettings, ServerSettings, StoreSettings, WatchSettings
 
 
@@ -199,6 +199,18 @@ class RuntimeFactoryTests(unittest.TestCase):
                     build_services(app_config, self._settings())
 
         store.close.assert_called_once_with()
+
+    def test_build_client_treats_missing_impersonate_target_as_empty(self) -> None:
+        app_config = {
+            "site": {"base_url": "https://forum.example", "timeout_secs": 20},
+            "auth": {"cookie": "_t=1", "proxy": "", "disabled": False},
+            "request": {"user_agent": "", "max_retries": 2, "min_interval_secs": 1},
+            "flaresolverr": {"enabled": False, "base_url": "", "request_timeout_secs": 60, "ua_probe_url": ""},
+        }
+
+        client = build_client(app_config)
+
+        self.assertEqual(client._requester._session.impersonate_target, "")
 
     def test_runtime_factory_import_does_not_eagerly_load_command_stack(self) -> None:
         script = """

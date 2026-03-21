@@ -19,7 +19,7 @@
 - `auth.disabled=true` 时会阻止当前账号启动
 - `auth.status` / `auth.disabled` / `auth.last_ok` / `auth.last_fail` / `auth.last_error` / `auth.note` 主要用于运行时状态记录
 - `request.user_agent` 为空时，优先使用 `impersonate_target` 对应的内置 UA；若没有映射且启用了 FlareSolverr，则会通过 `ua_probe_url`（默认 `data:,`）获取
-- `request.impersonate_target` 指定 `curl_cffi` impersonate 目标；留空时使用默认值
+- `request.impersonate_target` 指定 `curl_cffi` impersonate 目标；缺省或显式留空都会按空值处理，运行时再依赖内置 UA 映射、UA 探测或后续推断来决定
 - UA 探测只用于获取 `userAgent`，不会携带当前站点 cookie，也不会把 probe 返回的 cookie 写回账号状态
 - `request.max_retries` 请求失败后的额外重试次数；`0` 表示无限重试。默认值为 `1`，与旧版默认实际行为一致
 - 遇到 `BAD CSRF` 时会强制重新请求 `/session/csrf` 获取新 token，不会仅复用当前内存里的缓存 token
@@ -54,6 +54,8 @@
 - `server.same_error_stop_threshold` 连续相同错误次数达到阈值后自动停止（0 为关闭）
 - `server.api_key` HTTP 服务鉴权（为空则不启用）
 - 当 `server.host` 或 `discorsair serve --host` 使用非回环地址时，必须配置 `server.api_key`
+- `serve` 模式下，如果 watch 线程或 HTTP 控制接口命中登录失效 / unresolved challenge，会停止 watch、关闭 HTTP 服务，并以非 0 退出
+- 其中登录失效会把账号标记为 `invalid` 并禁用；其他 fatal 错误会写入 `auth.last_fail` / `auth.last_error`
 - `time.timezone` 时区（用于今日统计与运行时段）
 - 模板文件为 JSONC（允许 `//` 注释），程序也支持读取 JSONC
 

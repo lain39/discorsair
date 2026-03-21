@@ -104,6 +104,7 @@ discorsair serve --host 0.0.0.0 --port 8080
 说明：
 
 - 如果绑定 `0.0.0.0` 或其他非回环地址，需先配置 `server.api_key`
+- 如果 watch 线程或控制接口触发登录失效 / unresolved challenge，服务会自停并以非 0 退出
 
 可用接口：
 
@@ -119,6 +120,14 @@ discorsair serve --host 0.0.0.0 --port 8080
 - 如果配置了 `server.api_key`，请求需带 `X-API-Key: <key>` 头
 - 默认监听地址建议保持 `127.0.0.1`
 - 如果改成 `0.0.0.0` 或其他非回环地址，必须配置 `server.api_key`
+
+常见错误响应：
+
+- `401 {"error":"unauthorized"}`：缺少或错误的 `X-API-Key`
+- `401 {"error":"not_logged_in"}`：请求命中登录失效；服务会触发 fatal stop 并关闭
+- `503 {"error":"challenge_unresolved"}`：过盾后仍被 Cloudflare 阻断；服务会触发 fatal stop 并关闭
+- `504 {"error":"timeout"}`：控制接口执行超时
+- `500 {"error":"internal"}`：其他未处理异常
 
 **接口返回（示例）**
 
