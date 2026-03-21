@@ -93,6 +93,7 @@ class RequesterTests(unittest.TestCase):
 
         self.assertEqual(user_agent, "ua-from-flaresolverr")
         self.assertEqual(requester._session.user_agent, "ua-from-flaresolverr")
+        self.assertEqual(requester.get_csrf_token_hint(), "")
         payload = post.call_args.kwargs["json"]
         self.assertNotIn("cookies", payload)
         self.assertNotIn("probe_cookie", requester._session.cookies)

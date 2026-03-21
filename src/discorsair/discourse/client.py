@@ -220,7 +220,9 @@ class DiscourseClient:
         return self._csrf_token or ""
 
     def _sync_csrf_token_hint(self) -> None:
-        hint_getter = getattr(self._requester, "get_csrf_token_hint", None)
+        hint_getter = getattr(self._requester, "consume_csrf_token_hint", None)
+        if not callable(hint_getter):
+            hint_getter = getattr(self._requester, "get_csrf_token_hint", None)
         if not callable(hint_getter):
             return
         hinted = str(hint_getter() or "")

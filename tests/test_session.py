@@ -102,6 +102,11 @@ class _Requester:
     def get_csrf_token_hint(self) -> str:
         return self._csrf_token_hint
 
+    def consume_csrf_token_hint(self) -> str:
+        hint = self._csrf_token_hint
+        self._csrf_token_hint = ""
+        return hint
+
 
 class WatchAndServerTests(unittest.TestCase):
     def test_validate_server_binding_requires_api_key_for_public_host(self) -> None:
@@ -200,6 +205,20 @@ class WatchAndServerTests(unittest.TestCase):
         self.assertEqual(len(requester.calls), 1)
         self.assertEqual(requester.calls[0][0][1], "/latest.json")
         self.assertEqual(requester.calls[0][1]["headers"]["x-csrf-token"], "hinted-csrf")
+        self.assertEqual(requester._csrf_token_hint, "")
+
+    def test_force_refreshed_csrf_is_not_overwritten_by_stale_hint(self) -> None:
+        requester = _Requester([_Response(200, '{"csrf":"fresh"}'), _Response(200, '{"topic_list": {}}')])
+        requester._csrf_token_hint = "hinted-csrf"
+        client = DiscourseClient(requester=requester, csrf_token="old")
+
+        token = client.get_csrf(force_refresh=True)
+        client.get_latest()
+
+        self.assertEqual(token, "fresh")
+        self.assertEqual(len(requester.calls), 2)
+        self.assertEqual(requester.calls[1][0][1], "/latest.json")
+        self.assertEqual(requester.calls[1][1]["headers"]["x-csrf-token"], "fresh")
 
 
 if __name__ == "__main__":

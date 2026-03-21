@@ -467,6 +467,11 @@ class Requester:
     def get_csrf_token_hint(self) -> str:
         return self._csrf_token_hint
 
+    def consume_csrf_token_hint(self) -> str:
+        hint = self._csrf_token_hint
+        self._csrf_token_hint = ""
+        return hint
+
     def last_response_ok(self) -> bool | None:
         return self._session.last_response_ok
 
@@ -530,9 +535,11 @@ class Requester:
                 solution.get("userAgent", ""),
                 _summarize_cookies(solution_cookies),
             )
-        csrf_token = _extract_csrf_token_from_html(
-            str(solution.get("response") or solution.get("html") or "")
-        )
+        csrf_token = ""
+        if include_cookies and persist_solution_cookies:
+            csrf_token = _extract_csrf_token_from_html(
+                str(solution.get("response") or solution.get("html") or "")
+            )
         if csrf_token:
             self._csrf_token_hint = csrf_token
             _LOG.info("flaresolverr extracted csrf token: %s", _mask_secret(csrf_token))
