@@ -14,6 +14,8 @@
 - `auth.cookie` 登录 cookie（必填），配置中建议只保存 `_t=...`
 - `auth.proxy` 可设置代理（可留空）
 - `auth.name` 账号标识（用于通知前缀）
+- 支持用环境变量覆盖敏感字段：`DISCORSAIR_AUTH_COOKIE -> auth.cookie`、`DISCORSAIR_AUTH_NAME -> auth.name`、`DISCORSAIR_AUTH_KEY -> server.api_key`
+- 环境变量覆盖发生在读取配置文件之后、校验之前；因此 `auth.cookie` 可以不写在文件里，改由 `DISCORSAIR_AUTH_COOKIE` 注入
 - `auth.disabled=true` 时会阻止当前账号启动
 - `auth.status` / `auth.disabled` / `auth.last_ok` / `auth.last_fail` / `auth.last_error` / `auth.note` 主要用于运行时状态记录
 - `request.user_agent` 为空时，优先使用 `impersonate_target` 对应的内置 UA；若没有映射且启用了 FlareSolverr，则会通过 `ua_probe_url`（默认 `data:,`）获取

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -77,7 +78,9 @@ def default_app_config() -> dict[str, Any]:
 
 def load_app_config(path: str | Path) -> dict[str, Any]:
     data = jsonc_loads(Path(path).read_text(encoding="utf-8"))
-    return _merge_dicts(default_app_config(), data)
+    merged = _merge_dicts(default_app_config(), data)
+    _apply_env_overrides(merged)
+    return merged
 
 
 def validate_app_config(config: dict[str, Any]) -> None:
@@ -92,3 +95,22 @@ def validate_app_config(config: dict[str, Any]) -> None:
         ZoneInfo(tz)
     except ZoneInfoNotFoundError as exc:
         raise ValueError(f"invalid timezone: {tz}") from exc
+
+
+def _apply_env_overrides(config: dict[str, Any]) -> None:
+    auth = config.setdefault("auth", {})
+    server = config.setdefault("server", {})
+    if not isinstance(auth, dict) or not isinstance(server, dict):
+        return
+
+    env_name = os.getenv("DISCORSAIR_AUTH_NAME")
+    if env_name:
+        auth["name"] = env_name
+
+    env_cookie = os.getenv("DISCORSAIR_AUTH_COOKIE")
+    if env_cookie:
+        auth["cookie"] = env_cookie
+
+    env_auth_key = os.getenv("DISCORSAIR_AUTH_KEY")
+    if env_auth_key:
+        server["api_key"] = env_auth_key
