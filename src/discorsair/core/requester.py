@@ -42,6 +42,10 @@ _HTML_HINT_RE = re.compile(r"<\s*(html|head|title)\b", re.IGNORECASE)
 _JSON_ERR_RE = re.compile(r'"error_type"\s*:|bad csrf', re.IGNORECASE)
 _LEADING_WS_RE = re.compile(r"^\s*")
 _CF_REDIRECT_RE = re.compile(r"/cdn-cgi/|challenges\.cloudflare\.com", re.IGNORECASE)
+_CSRF_META_RE = re.compile(
+    r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
 _MAX_RETRY_DELAY_SECS = 300
 
 
@@ -211,6 +215,7 @@ class Requester:
         self._max_retries = max(int(max_retries), 0)
         self._timeout_secs = max(float(timeout_secs), 1.0)
         self._lock = threading.Lock()
+        self._csrf_token_hint = ""
         if not self._session.cookies:
             self._session.cookies = parse_cookie_header(self._session.cookie_header)
 
@@ -347,6 +352,7 @@ class Requester:
                     _LOG.info("challenge detected, solving via FlareSolverr and retrying")
                     try:
                         self._solve_challenge()
+                        self._apply_csrf_token_hint(req_headers)
                         if self._debug:
                             _LOG.debug("retry request headers: %s", _redact_headers(req_headers))
                             _LOG.debug("retry request cookies: %s", _summarize_cookies(dict(self._session.cookies)))
@@ -458,6 +464,9 @@ class Requester:
     def get_cookie_header(self) -> str:
         return cookies_to_header(self._session.cookies)
 
+    def get_csrf_token_hint(self) -> str:
+        return self._csrf_token_hint
+
     def last_response_ok(self) -> bool | None:
         return self._session.last_response_ok
 
@@ -521,6 +530,12 @@ class Requester:
                 solution.get("userAgent", ""),
                 _summarize_cookies(solution_cookies),
             )
+        csrf_token = _extract_csrf_token_from_html(
+            str(solution.get("response") or solution.get("html") or "")
+        )
+        if csrf_token:
+            self._csrf_token_hint = csrf_token
+            _LOG.info("flaresolverr extracted csrf token: %s", _mask_secret(csrf_token))
         if not persist_solution_cookies:
             return solution
         cookies_list = solution.get("cookies", [])
@@ -543,6 +558,15 @@ class Requester:
             raise RuntimeError("base_url is required to solve challenge")
         self._flaresolverr_request("get", base)
 
+    def _apply_csrf_token_hint(self, headers: Dict[str, str]) -> None:
+        if not self._csrf_token_hint:
+            return
+        for key in list(headers.keys()):
+            if _normalize_header_key(key) == "x-csrf-token":
+                headers[key] = self._csrf_token_hint
+                _LOG.info("request: updated x-csrf-token from FlareSolverr solution")
+                return
+
 
 def _redact_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     redacted = {}
@@ -558,3 +582,12 @@ def _redact_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
 def _retry_delay_secs(attempt: int) -> int:
     safe_attempt = max(int(attempt), 0)
     return min(2 ** safe_attempt, _MAX_RETRY_DELAY_SECS)
+
+
+def _extract_csrf_token_from_html(html: str) -> str:
+    if not html:
+        return ""
+    match = _CSRF_META_RE.search(html)
+    if not match:
+        return ""
+    return match.group(1).strip()

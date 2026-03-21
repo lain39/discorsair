@@ -20,6 +20,7 @@
 - `request.impersonate_target` 指定 `curl_cffi` impersonate 目标；留空时使用默认值
 - UA 探测只用于获取 `userAgent`，不会携带当前站点 cookie，也不会把 probe 返回的 cookie 写回账号状态
 - `request.max_retries` 请求失败后的额外重试次数；`0` 表示无限重试。默认值为 `1`，与旧版默认实际行为一致
+- 遇到 `BAD CSRF` 时会强制重新请求 `/session/csrf` 获取新 token，不会仅复用当前内存里的缓存 token
 - `flaresolverr.ua_probe_url` 可省略，不填时默认使用 `data:,`
 - `storage.path` 指定 SQLite 存储路径（默认 `data/discorsair.db`）
 - `storage.auto_per_site` 按站点自动区分数据库文件
@@ -63,6 +64,7 @@
 - 如果 `auth.proxy` 使用回环地址（如 `http://127.0.0.1:7890`），传给 FlareSolverr 的代理需要转换为 `http://host.docker.internal:7890`
 - 如果 `auth.proxy` 包含认证信息，配置里应保持 URL 编码形式；`curl_cffi` 直接使用该 URL，FlareSolverr 会改为 `{"url","username","password"}` 结构并对账号密码做 URL 解码后再发送
 - 该转换由 `src/core/` 处理
+- 过盾时会使用 FlareSolverr 访问 `base_url`；如果返回 HTML 含 `<meta name="csrf-token" ...>`，运行时会提取该 token，并用于本次重试及后续请求的 CSRF 同步
 - `cf_clearance` 可按代理 IP 做本地缓存，下次同 IP 先尝试复用
 - 运行时仅在成功请求后才会把最新 `_t` 写回 `auth.cookie`；其他 cookie 不会持久化到配置，空 `_t` 或未变化的值也不会覆盖配置
 

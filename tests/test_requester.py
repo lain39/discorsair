@@ -17,11 +17,21 @@ sys.modules.setdefault("curl_cffi", types.SimpleNamespace(requests=fake_requests
 sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
-from discorsair.core.requester import Requester, _build_flaresolverr_proxy, _retry_delay_secs, _translate_proxy_for_flaresolverr
+from discorsair.core.requester import (
+    Requester,
+    _build_flaresolverr_proxy,
+    _extract_csrf_token_from_html,
+    _retry_delay_secs,
+    _translate_proxy_for_flaresolverr,
+)
 from discorsair.core.session import SessionState
 
 
 class RequesterTests(unittest.TestCase):
+    def test_extract_csrf_token_from_html(self) -> None:
+        html = '<html><head><meta name="csrf-token" content="csrf-123"></head></html>'
+        self.assertEqual(_extract_csrf_token_from_html(html), "csrf-123")
+
     def test_retry_delay_grows_with_attempts(self) -> None:
         self.assertEqual(_retry_delay_secs(0), 1)
         self.assertEqual(_retry_delay_secs(1), 2)
@@ -176,6 +186,60 @@ class RequesterTests(unittest.TestCase):
         self.assertEqual(calls.count("https://forum.example/latest.json"), 3)
         solve.assert_called_once()
         backoff.assert_called_once()
+
+    def test_challenge_retry_replaces_csrf_header_from_flaresolverr_html(self) -> None:
+        requester = Requester(
+            session=SessionState(
+                base_url="https://forum.example",
+                cookie_header="_t=1",
+                impersonate_target="chrome110",
+                user_agent="ua",
+            ),
+            flaresolverr_base_url="http://flaresolverr:8191",
+            flaresolverr_timeout_secs=60,
+            ua_probe_url=None,
+            max_retries=1,
+        )
+
+        class DummyResponse:
+            def __init__(self, status_code: int, text: str, headers: dict[str, str] | None = None) -> None:
+                self.status_code = status_code
+                self.text = text
+                self.headers = headers or {}
+                self.cookies = {}
+
+        class DummyFsResponse:
+            def json(self) -> dict[str, object]:
+                return {
+                    "status": "ok",
+                    "solution": {
+                        "response": (
+                            '<html><head><meta name="csrf-token" content="new-csrf"></head></html>'
+                        ),
+                        "cookies": [{"name": "cf_clearance", "value": "abc"}],
+                    },
+                }
+
+        calls: list[dict[str, object]] = []
+
+        def fake_request(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return DummyResponse(403, "<html>Just a moment</html>", {"Content-Type": "text/html"})
+            return DummyResponse(200, "{\"ok\":true}", {"Content-Type": "application/json"})
+
+        with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()):
+            with patch("discorsair.core.requester.requests.request", side_effect=fake_request):
+                response = requester.request(
+                    "post",
+                    "/timings",
+                    headers={"x-csrf-token": "old-csrf"},
+                    data="topic_id=1",
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(calls[1]["headers"]["x-csrf-token"], "new-csrf")
+        self.assertEqual(requester.get_csrf_token_hint(), "new-csrf")
 
     def test_max_retries_counts_additional_retries(self) -> None:
         requester = Requester(

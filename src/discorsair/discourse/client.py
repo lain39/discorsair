@@ -21,8 +21,7 @@ class DiscourseClient:
         self._csrf_token = csrf_token
 
     def get_latest(self) -> Dict[str, Any]:
-        if not self._csrf_token:
-            self.get_csrf()
+        self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: get_latest")
         resp = self._requester.request(
             "get",
@@ -35,8 +34,7 @@ class DiscourseClient:
         return resp.json()
 
     def get_unseen(self) -> Dict[str, Any]:
-        if not self._csrf_token:
-            self.get_csrf()
+        self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: get_unseen")
         resp = self._requester.request(
             "get",
@@ -49,8 +47,7 @@ class DiscourseClient:
         return resp.json()
 
     def get_topic(self, topic_id: int, track_visit: bool = True, force_load: bool = True) -> Dict[str, Any]:
-        if not self._csrf_token:
-            self.get_csrf()
+        self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: get_topic topic=%s track_visit=%s", topic_id, track_visit)
         params = {
             "track_visit": "true" if track_visit else "false",
@@ -73,8 +70,7 @@ class DiscourseClient:
         return resp.json()
 
     def get_posts_by_ids(self, topic_id: int, post_ids: list[int]) -> Dict[str, Any]:
-        if not self._csrf_token:
-            self.get_csrf()
+        self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: get_posts_by_ids topic=%s count=%s", topic_id, len(post_ids))
         params = {
             "post_ids[]": [str(pid) for pid in post_ids],
@@ -94,7 +90,13 @@ class DiscourseClient:
         )
         return resp.json()
 
-    def get_csrf(self) -> str:
+    def get_csrf(self, force_refresh: bool = False) -> str:
+        self._sync_csrf_token_hint()
+        if self._csrf_token and not force_refresh:
+            logging.getLogger(__name__).info("discourse: get_csrf using cached token")
+            return self._csrf_token
+        if force_refresh:
+            logging.getLogger(__name__).info("discourse: get_csrf force refresh")
         logging.getLogger(__name__).info("discourse: get_csrf")
         resp = self._requester.request(
             "get",
@@ -109,8 +111,7 @@ class DiscourseClient:
         return self._csrf_token or ""
 
     def get_notifications(self, limit: int = 30, recent: bool = True) -> Dict[str, Any]:
-        if not self._csrf_token:
-            self.get_csrf()
+        self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: get_notifications limit=%s recent=%s", limit, recent)
         params = {
             "limit": str(limit),
@@ -128,8 +129,7 @@ class DiscourseClient:
         return resp.json()
 
     def post_timings(self, topic_id: int, timings: Dict[int, int], topic_time: int, _retried: bool = False) -> None:
-        if not self._csrf_token:
-            self.get_csrf()
+        self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: post_timings topic=%s posts=%s", topic_id, list(timings.keys()))
         body = "&".join(
             [*(f"timings%5B{post}%5D={ms}" for post, ms in timings.items()), f"topic_time={topic_time}", f"topic_id={topic_id}"]
@@ -154,7 +154,7 @@ class DiscourseClient:
             logging.getLogger(__name__).warning("discourse: BAD CSRF, refreshing token and retrying")
             if _retried:
                 raise RuntimeError("post_timings failed after CSRF retry")
-            self.get_csrf()
+            self.get_csrf(force_refresh=True)
             self.post_timings(topic_id, timings, topic_time, _retried=True)
             return
         payload: Any
@@ -165,8 +165,7 @@ class DiscourseClient:
         self._raise_for_error(resp.status, payload, "post_timings")
 
     def toggle_reaction(self, post_id: int, emoji: str) -> Dict[str, Any]:
-        if not self._csrf_token:
-            self.get_csrf()
+        self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: toggle_reaction post=%s emoji=%s", post_id, emoji)
         return self._request_json(
             "put",
@@ -180,8 +179,7 @@ class DiscourseClient:
         )
 
     def reply(self, topic_id: int, raw: str, category: Optional[int] = None) -> Dict[str, Any]:
-        if not self._csrf_token:
-            self.get_csrf()
+        self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: reply topic=%s len=%s", topic_id, len(raw))
         typing_ms, open_ms = _estimate_composer_timings(raw)
         payload = {
@@ -215,6 +213,21 @@ class DiscourseClient:
     def last_response_ok(self) -> bool | None:
         return self._requester.last_response_ok()
 
+    def _ensure_csrf_token(self) -> str:
+        self._sync_csrf_token_hint()
+        if not self._csrf_token:
+            self.get_csrf()
+        return self._csrf_token or ""
+
+    def _sync_csrf_token_hint(self) -> None:
+        hint_getter = getattr(self._requester, "get_csrf_token_hint", None)
+        if not callable(hint_getter):
+            return
+        hinted = str(hint_getter() or "")
+        if hinted and hinted != self._csrf_token:
+            logging.getLogger(__name__).info("discourse: synced csrf token from FlareSolverr solution")
+            self._csrf_token = hinted
+
     def _request_json(
         self,
         method: str,
@@ -239,7 +252,7 @@ class DiscourseClient:
             logging.getLogger(__name__).warning("discourse: %s got BAD CSRF, refreshing token and retrying", operation)
             if _retried:
                 raise RuntimeError(f"{operation} failed after CSRF retry")
-            self.get_csrf()
+            self.get_csrf(force_refresh=True)
             retry_headers = dict(headers)
             retry_headers["x-csrf-token"] = self._csrf_token or ""
             return self._request_json(

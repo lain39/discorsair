@@ -86,8 +86,11 @@ class _Response:
 class _Requester:
     def __init__(self, responses: list[_Response]) -> None:
         self._responses = list(responses)
+        self.calls: list[tuple[tuple, dict]] = []
+        self._csrf_token_hint = ""
 
     def request(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         return self._responses.pop(0)
 
     def get_cookie_header(self) -> str:
@@ -95,6 +98,9 @@ class _Requester:
 
     def last_response_ok(self):
         return True
+
+    def get_csrf_token_hint(self) -> str:
+        return self._csrf_token_hint
 
 
 class WatchAndServerTests(unittest.TestCase):
@@ -171,7 +177,29 @@ class WatchAndServerTests(unittest.TestCase):
         with patch.object(client, "get_csrf", return_value="new") as refresh:
             client.post_timings(topic_id=1, timings={1: 1000}, topic_time=1000)
 
-        refresh.assert_called_once()
+        refresh.assert_called_once_with(force_refresh=True)
+
+    def test_get_csrf_force_refresh_ignores_cached_token(self) -> None:
+        requester = _Requester([_Response(200, '{"csrf":"fresh"}')])
+        requester._csrf_token_hint = "hinted-csrf"
+        client = DiscourseClient(requester=requester, csrf_token="old")
+
+        token = client.get_csrf(force_refresh=True)
+
+        self.assertEqual(token, "fresh")
+        self.assertEqual(len(requester.calls), 1)
+        self.assertEqual(requester.calls[0][0][1], "/session/csrf")
+
+    def test_get_latest_uses_requester_csrf_hint(self) -> None:
+        requester = _Requester([_Response(200, '{"topic_list": {}}')])
+        requester._csrf_token_hint = "hinted-csrf"
+        client = DiscourseClient(requester=requester, csrf_token="")
+
+        client.get_latest()
+
+        self.assertEqual(len(requester.calls), 1)
+        self.assertEqual(requester.calls[0][0][1], "/latest.json")
+        self.assertEqual(requester.calls[0][1]["headers"]["x-csrf-token"], "hinted-csrf")
 
 
 if __name__ == "__main__":

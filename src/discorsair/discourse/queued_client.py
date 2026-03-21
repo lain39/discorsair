@@ -38,8 +38,8 @@ class QueuedDiscourseClient:
     def get_posts_by_ids(self, topic_id: int, post_ids: list[int]) -> Dict[str, Any]:
         return self._call(lambda: self._inner.get_posts_by_ids(topic_id, post_ids), priority=10)
 
-    def get_csrf(self) -> str:
-        return self._call(self._inner.get_csrf, priority=5)
+    def get_csrf(self, force_refresh: bool = False) -> str:
+        return self._call(lambda: self._inner.get_csrf(force_refresh=force_refresh), priority=5)
 
     def get_notifications(self, limit: int = 30, recent: bool = True) -> Dict[str, Any]:
         return self._call(lambda: self._inner.get_notifications(limit=limit, recent=recent), priority=10)
