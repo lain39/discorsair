@@ -170,6 +170,136 @@ class RuntimeFactoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "config.queue.timeout_secs has been removed"):
             self._load_runtime_app_config(config_text)
 
+    def test_load_runtime_app_config_rejects_non_object_site(self) -> None:
+        config_text = """
+{
+  "site": "https://forum.example",
+  "auth": {"cookie": "_t=file-token"}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.site must be an object"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_non_string_base_url(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": 123},
+  "auth": {"cookie": "_t=file-token"}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.site.base_url must be a string"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_non_object_plugin_item(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "plugins": {
+    "items": {
+      "demo": "bad"
+    }
+  }
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.plugins.items.demo must be an object"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_non_integer_plugin_priority(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "plugins": {
+    "items": {
+      "demo": {"enabled": true, "priority": "high"}
+    }
+  }
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.plugins.items.demo.priority must be an integer"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_non_boolean_plugin_enabled(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "plugins": {
+    "items": {
+      "demo": {"enabled": "false"}
+    }
+  }
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.plugins.items.demo.enabled must be a boolean"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_non_integer_server_max_posts(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "server": {"max_posts_per_interval": "10"}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.server.max_posts_per_interval must be an integer or null"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_non_string_schedule_items(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "server": {"schedule": [1]}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.server.schedule items must be strings"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_invalid_schedule_window_format(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "server": {"schedule": ["25:00-26:00"]}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.server.schedule\\[0\\] must use valid 24-hour times"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_non_string_server_host(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "server": {"host": 123}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.server.host must be a string"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_non_string_server_api_key(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "server": {"api_key": 123}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.server.api_key must be a string"):
+            self._load_runtime_app_config(config_text)
+
     def test_load_settings_builds_structured_values(self) -> None:
         app_config = {
             "site": {"base_url": "https://meta.example.com/forum"},

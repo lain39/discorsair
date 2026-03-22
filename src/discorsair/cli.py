@@ -23,14 +23,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_p = sub.add_parser("run", help="Run watch loop")
-    run_p.add_argument("--interval", type=int, default=30)
+    run_p.add_argument("--interval", type=_positive_int, default=30)
     run_p.add_argument("--once", action="store_true")
-    run_p.add_argument("--max-posts-per-interval", type=int, default=200)
+    run_p.add_argument("--max-posts-per-interval", type=_non_negative_int, default=200)
 
     watch_p = sub.add_parser("watch", help="Watch latest topics")
-    watch_p.add_argument("--interval", type=int, default=30)
+    watch_p.add_argument("--interval", type=_positive_int, default=30)
     watch_p.add_argument("--once", action="store_true")
-    watch_p.add_argument("--max-posts-per-interval", type=int, default=200)
+    watch_p.add_argument("--max-posts-per-interval", type=_non_negative_int, default=200)
 
     daily_p = sub.add_parser("daily", help="Daily activity")
     daily_p.add_argument("--topic", type=int, default=None)
@@ -67,6 +67,26 @@ def _extract_config_from_unknown(unknown: list[str]) -> tuple[str | None, list[s
     config_parser.add_argument("--config")
     cfg_args, rest = config_parser.parse_known_args(unknown)
     return cfg_args.config, rest
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer >= 0") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer >= 1") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:

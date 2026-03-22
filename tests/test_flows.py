@@ -164,14 +164,15 @@ class FlowTests(unittest.TestCase):
         remaining = _touch_topic(
             client,
             store,
-            {"id": 123, "title": "hello", "last_read_post_number": 0},
+            {"id": 123, "title": "hello", "last_read_post_number": 0, "unseen": True},
             123,
             remaining_posts=10,
             crawl_enabled=True,
             timings_per_topic=1,
         )
 
-        self.assertEqual(remaining, 10)
+        self.assertEqual(remaining.remaining_posts, 10)
+        self.assertEqual([post["id"] for post in remaining.content_posts], [501, 502, 503, 504, 505])
         self.assertEqual(store.last_synced_post_number, 5)
         self.assertEqual(len(store.upserts), 1)
         self.assertEqual(store.upserts[0][1], 5)
@@ -183,16 +184,33 @@ class FlowTests(unittest.TestCase):
         remaining = _touch_topic(
             client,
             store,
-            {"id": 123, "title": "hello", "last_read_post_number": 0},
+            {"id": 123, "title": "hello", "last_read_post_number": 0, "unseen": True},
             123,
             remaining_posts=0,
             crawl_enabled=True,
             timings_per_topic=1,
         )
 
-        self.assertEqual(remaining, 0)
+        self.assertEqual(remaining.remaining_posts, 0)
+        self.assertEqual([post["id"] for post in remaining.content_posts], [501])
         self.assertEqual(store.last_synced_post_number, 0)
         self.assertEqual(store.upserts, [])
+
+    def test_touch_topic_excludes_entered_posts_from_content_when_not_unseen_in_crawl_mode(self) -> None:
+        client = _Client()
+        store = _Store()
+
+        result = _touch_topic(
+            client,
+            store,
+            {"id": 123, "title": "hello", "last_read_post_number": 0, "unseen": False},
+            123,
+            remaining_posts=10,
+            crawl_enabled=True,
+            timings_per_topic=1,
+        )
+
+        self.assertEqual([post["id"] for post in result.content_posts], [502, 503, 504, 505])
 
 
 if __name__ == "__main__":

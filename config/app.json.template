@@ -51,6 +51,41 @@
     "use_unseen": false,
     "timings_per_topic": 30
   },
+
+  // 插件系统
+  "plugins": {
+    "dir": "plugins",
+    "hook_timeout_secs": 10,
+    "max_consecutive_failures": 3,
+    "items": {
+      // 示例见 plugins/sample_forum_ops/
+      "sample_forum_ops": {
+        "enabled": false,
+        "priority": 100,
+        "permissions": [
+          "topics.reorder",
+          "topics.skip",
+          "reply.create",
+          "post.like"
+        ],
+        "limits": {
+          "reply_per_day": 1,
+          "like_per_day": 30
+        },
+        "config": {
+          "priority_title_keywords": [
+            "主题词"
+          ],
+          "skip_title_keywords": [],
+          "reply_mode": "after_crawl",
+          "reply_text": "这里填回复内容",
+          "reply_title_keywords": [],
+          "reply_post_keywords": [],
+          "min_like_count": 10
+        }
+      }
+    }
+  },
   // 请求队列
   "queue": {
     "maxsize": 0

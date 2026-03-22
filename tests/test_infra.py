@@ -374,6 +374,16 @@ class SQLiteStoreTests(unittest.TestCase):
                 self.assertEqual(store.get_stats_total()["posts_fetched"], 4)
                 self.assertEqual(store.get_stats_today()["topics_seen"], 2)
                 self.assertEqual(store.get_stats_today()["posts_fetched"], 4)
+
+                self.assertEqual(store.get_plugin_daily_count("plug", "like"), 0)
+                self.assertEqual(store.inc_plugin_daily_count("plug", "like", 2), 2)
+                self.assertEqual(store.get_plugin_daily_count("plug", "like"), 2)
+                self.assertFalse(store.plugin_once_exists("plug", "topic:1"))
+                store.mark_plugin_once("plug", "topic:1")
+                self.assertTrue(store.plugin_once_exists("plug", "topic:1"))
+                self.assertEqual(store.get_plugin_kv("plug", "k", default=None), None)
+                store.set_plugin_kv("plug", "k", {"v": 1})
+                self.assertEqual(store.get_plugin_kv("plug", "k", default=None), {"v": 1})
             finally:
                 store.close()
 
@@ -440,9 +450,15 @@ class _DummyWatchController:
         if use_unseen is not None:
             self._use_unseen = bool(use_unseen)
         if timings_per_topic is not None:
-            self._timings_per_topic = max(1, int(timings_per_topic))
+            parsed_timings = int(timings_per_topic)
+            if parsed_timings < 1:
+                raise ValueError("timings_per_topic must be >= 1")
+            self._timings_per_topic = parsed_timings
         if max_posts_per_interval is not False and max_posts_per_interval is not None:
-            self._max_posts_per_interval = int(max_posts_per_interval)
+            parsed_max_posts = int(max_posts_per_interval)
+            if parsed_max_posts < 0:
+                raise ValueError("max_posts_per_interval must be >= 0 or null")
+            self._max_posts_per_interval = parsed_max_posts
         if max_posts_per_interval is None:
             self._max_posts_per_interval = None
         return {
@@ -492,6 +508,7 @@ class ControlHandlerTests(unittest.TestCase):
         method: str,
         path: str,
         body: dict[str, object] | None = None,
+        raw_body: str | None = None,
         headers: dict[str, str] | None = None,
         *,
         client: _DummyClient | None = None,
@@ -502,7 +519,10 @@ class ControlHandlerTests(unittest.TestCase):
         handler = object.__new__(ControlHandler)
         request_headers = dict(headers or {})
         payload = ""
-        if body is not None:
+        if raw_body is not None:
+            payload = raw_body
+            request_headers["Content-Type"] = "application/json"
+        elif body is not None:
             payload = json.dumps(body)
             request_headers["Content-Type"] = "application/json"
         request_headers["Content-Length"] = str(len(payload.encode("utf-8")))
@@ -547,6 +567,39 @@ class ControlHandlerTests(unittest.TestCase):
         self.assertEqual(server.watch_controller._timings_per_topic, 12)
         self.assertEqual(server.watch_controller._max_posts_per_interval, 50)
 
+    def test_watch_config_rejects_non_boolean_use_unseen(self) -> None:
+        (status, data), server = self._run_handler(
+            "POST",
+            "/watch/config",
+            body={"use_unseen": "false"},
+            headers={"X-API-Key": "secret"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "bad_request", "detail": "use_unseen must be a boolean"})
+        self.assertFalse(server.watch_controller._use_unseen)
+
+    def test_watch_config_rejects_negative_max_posts_per_interval(self) -> None:
+        (status, data), server = self._run_handler(
+            "POST",
+            "/watch/config",
+            body={"max_posts_per_interval": -1},
+            headers={"X-API-Key": "secret"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "bad_request", "detail": "max_posts_per_interval must be >= 0 or null"})
+        self.assertEqual(server.watch_controller._max_posts_per_interval, 200)
+
+    def test_reply_rejects_non_string_raw(self) -> None:
+        (status, data), server = self._run_handler(
+            "POST",
+            "/reply",
+            body={"topic_id": 9, "raw": 123},
+            headers={"X-API-Key": "secret"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "bad_request", "detail": "raw must be a string"})
+        self.assertEqual(server.client.replies, [])
+
     def test_like_requires_post_id(self) -> None:
         (status, data), _ = self._run_handler("POST", "/like", body={}, headers={"X-API-Key": "secret"})
         self.assertEqual(status, 400)
@@ -562,6 +615,28 @@ class ControlHandlerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data, {"ok": True})
         self.assertEqual(server.watch_controller.start_calls, [False])
+
+    def test_watch_start_rejects_invalid_json(self) -> None:
+        (status, data), server = self._run_handler(
+            "POST",
+            "/watch/start",
+            raw_body="{bad json",
+            headers={"X-API-Key": "secret"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "bad_request", "detail": "invalid JSON body"})
+        self.assertEqual(server.watch_controller.start_calls, [])
+
+    def test_watch_start_rejects_non_boolean_use_schedule(self) -> None:
+        (status, data), server = self._run_handler(
+            "POST",
+            "/watch/start",
+            body={"use_schedule": "false"},
+            headers={"X-API-Key": "secret"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "bad_request", "detail": "use_schedule must be a boolean"})
+        self.assertEqual(server.watch_controller.start_calls, [])
 
     def test_watch_stop_calls_controller(self) -> None:
         (status, data), server = self._run_handler(

@@ -34,7 +34,7 @@ class DiscorsairRuntime:
 
     def run(self, args: argparse.Namespace) -> CommandOutcome:
         if args.command == "status":
-            return handle_status(self._settings)
+            return handle_status(self._app_config, self._settings)
         if args.command == "notify" and args.notify_cmd == "test":
             return handle_notify_test(self._notifier)
 

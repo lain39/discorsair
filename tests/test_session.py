@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -139,6 +141,7 @@ class WatchAndServerTests(unittest.TestCase):
             "schedule_windows": [],
             "notify_interval_secs": 60,
             "notify_auto_mark_read": False,
+            "plugin_manager": None,
             "auto_restart": True,
             "restart_backoff_secs": 1,
             "max_restarts": 0,
@@ -320,6 +323,267 @@ class WatchAndServerTests(unittest.TestCase):
         self.assertEqual(len(seen_sets), 2)
         self.assertIs(seen_sets[0], seen_sets[1])
 
+    def test_watch_controller_restarts_running_watch_when_runtime_config_changes(self) -> None:
+        controller = self._build_watch_controller(
+            interval_secs=1,
+            max_posts_per_interval=20,
+            use_unseen=False,
+            timings_per_topic=5,
+        )
+        started = threading.Event()
+        allow_exit = threading.Event()
+        calls: list[dict[str, object]] = []
+
+        def fake_watch(*args, **kwargs) -> None:
+            calls.append(
+                {
+                    "use_unseen": kwargs["use_unseen"],
+                    "timings_per_topic": kwargs["timings_per_topic"],
+                    "max_posts_per_interval": kwargs["max_posts_per_interval"],
+                }
+            )
+            started.set()
+            while not kwargs["stop_event"].is_set():
+                time.sleep(0.01)
+            allow_exit.wait(timeout=1)
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(started.wait(timeout=1))
+            started.clear()
+            allow_exit.set()
+            updated = controller.configure(
+                use_unseen=True,
+                timings_per_topic=12,
+                max_posts_per_interval=50,
+            )
+            self.assertEqual(
+                updated,
+                {
+                    "ok": True,
+                    "use_unseen": True,
+                    "timings_per_topic": 12,
+                    "max_posts_per_interval": 50,
+                },
+            )
+            self.assertTrue(started.wait(timeout=1))
+            self.assertEqual(
+                calls,
+                [
+                    {"use_unseen": False, "timings_per_topic": 5, "max_posts_per_interval": 20},
+                    {"use_unseen": True, "timings_per_topic": 12, "max_posts_per_interval": 50},
+                ],
+            )
+            self.assertEqual(controller.status()["use_unseen"], True)
+            self.assertEqual(controller.status()["timings_per_topic"], 12)
+            self.assertEqual(controller.status()["max_posts_per_interval"], 50)
+            controller.stop()
+            controller._runtime.thread.join(timeout=1)
+
+    def test_watch_controller_noop_config_does_not_restart_running_watch(self) -> None:
+        controller = self._build_watch_controller(
+            interval_secs=1,
+            max_posts_per_interval=20,
+            use_unseen=False,
+            timings_per_topic=5,
+        )
+        started = threading.Event()
+        calls: list[int] = []
+
+        def fake_watch(*args, **kwargs) -> None:
+            calls.append(1)
+            started.set()
+            while not kwargs["stop_event"].is_set():
+                time.sleep(0.01)
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(started.wait(timeout=1))
+            started_at = controller.status()["started_at"]
+            updated = controller.configure()
+            self.assertEqual(
+                updated,
+                {
+                    "ok": True,
+                    "use_unseen": False,
+                    "timings_per_topic": 5,
+                    "max_posts_per_interval": 20,
+                },
+            )
+            time.sleep(0.05)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(controller.status()["started_at"], started_at)
+            controller.stop()
+            controller._runtime.thread.join(timeout=1)
+
+    def test_watch_controller_status_hides_next_run_when_schedule_disabled(self) -> None:
+        controller = self._build_watch_controller(
+            schedule_windows=["08:00-12:00"],
+        )
+        started = threading.Event()
+
+        def fake_watch(*args, **kwargs) -> None:
+            started.set()
+            while not kwargs["stop_event"].is_set():
+                time.sleep(0.01)
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(started.wait(timeout=1))
+            status = controller.status()
+            self.assertEqual(status["use_schedule"], False)
+            self.assertEqual(status["schedule"], ["08:00-12:00"])
+            self.assertEqual(status["stopping"], False)
+            self.assertIsNone(status["next_run"])
+            controller.stop()
+            controller._runtime.thread.join(timeout=1)
+
+    def test_watch_controller_status_reports_stopping_while_thread_is_winding_down(self) -> None:
+        controller = self._build_watch_controller()
+        started = threading.Event()
+
+        def fake_watch(*args, **kwargs) -> None:
+            started.set()
+            time.sleep(0.2)
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(started.wait(timeout=1))
+            self.assertTrue(controller.stop())
+            status = controller.status()
+            self.assertEqual(status["running"], True)
+            self.assertEqual(status["stopping"], True)
+            controller._runtime.thread.join(timeout=1)
+            status = controller.status()
+            self.assertEqual(status["running"], False)
+            self.assertEqual(status["stopping"], False)
+
+    def test_watch_controller_configure_interrupts_restart_backoff(self) -> None:
+        controller = self._build_watch_controller(
+            interval_secs=1,
+            restart_backoff_secs=30,
+            max_posts_per_interval=20,
+            use_unseen=False,
+            timings_per_topic=5,
+        )
+        first_call = threading.Event()
+        restarted = threading.Event()
+        calls: list[dict[str, object]] = []
+
+        def fake_watch(*args, **kwargs) -> None:
+            calls.append(
+                {
+                    "use_unseen": kwargs["use_unseen"],
+                    "timings_per_topic": kwargs["timings_per_topic"],
+                    "max_posts_per_interval": kwargs["max_posts_per_interval"],
+                }
+            )
+            if len(calls) == 1:
+                first_call.set()
+                raise RuntimeError("boom")
+            restarted.set()
+            while not kwargs["stop_event"].is_set():
+                time.sleep(0.01)
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(first_call.wait(timeout=1))
+            start = time.monotonic()
+            updated = controller.configure(use_unseen=True)
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 5.0)
+            self.assertEqual(
+                updated,
+                {
+                    "ok": True,
+                    "use_unseen": True,
+                    "timings_per_topic": 5,
+                    "max_posts_per_interval": 20,
+                },
+            )
+            self.assertTrue(restarted.wait(timeout=1))
+            self.assertEqual(
+                calls,
+                [
+                    {"use_unseen": False, "timings_per_topic": 5, "max_posts_per_interval": 20},
+                    {"use_unseen": True, "timings_per_topic": 5, "max_posts_per_interval": 20},
+                ],
+            )
+            controller.stop()
+            controller._runtime.thread.join(timeout=1)
+
+    def test_watch_controller_configure_waits_for_inflight_request_timeout_budget(self) -> None:
+        client = types.SimpleNamespace(
+            _inner=types.SimpleNamespace(
+                _requester=types.SimpleNamespace(_timeout_secs=2.0),
+            )
+        )
+        controller = self._build_watch_controller(
+            client=client,
+            interval_secs=1,
+            restart_backoff_secs=1,
+            max_posts_per_interval=20,
+            use_unseen=False,
+            timings_per_topic=5,
+        )
+        started = threading.Event()
+        restarted = threading.Event()
+        calls: list[dict[str, object]] = []
+
+        def fake_watch(*args, **kwargs) -> None:
+            calls.append(
+                {
+                    "use_unseen": kwargs["use_unseen"],
+                    "timings_per_topic": kwargs["timings_per_topic"],
+                    "max_posts_per_interval": kwargs["max_posts_per_interval"],
+                }
+            )
+            if len(calls) == 1:
+                started.set()
+                time.sleep(1.2)
+                return
+            restarted.set()
+            while not kwargs["stop_event"].is_set():
+                time.sleep(0.01)
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(started.wait(timeout=1))
+            updated = controller.configure(use_unseen=True)
+            self.assertEqual(
+                updated,
+                {
+                    "ok": True,
+                    "use_unseen": True,
+                    "timings_per_topic": 5,
+                    "max_posts_per_interval": 20,
+                },
+            )
+            self.assertTrue(restarted.wait(timeout=1))
+            controller.stop()
+            controller._runtime.thread.join(timeout=1)
+
+    def test_watch_controller_stop_interrupts_restart_backoff(self) -> None:
+        controller = self._build_watch_controller(
+            interval_secs=1,
+            restart_backoff_secs=30,
+        )
+        first_call = threading.Event()
+
+        def fake_watch(*args, **kwargs) -> None:
+            first_call.set()
+            raise RuntimeError("boom")
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(first_call.wait(timeout=1))
+            start = time.monotonic()
+            self.assertTrue(controller.stop())
+            controller._runtime.thread.join(timeout=1)
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 5.0)
+            self.assertFalse(controller._runtime.thread.is_alive())
+
     def test_poll_notifications_marks_only_successful_sends(self) -> None:
         store = _RecordingStore()
         notifier = _Notifier()
@@ -423,6 +687,7 @@ class WatchAndServerTests(unittest.TestCase):
                 "stats_total": None,
                 "stats_today": None,
                 "storage_path": None,
+                "plugins": {"enabled": False, "count": 0, "backend": None, "runtime_live": False, "items": []},
             },
         )
 

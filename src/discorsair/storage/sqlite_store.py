@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import logging
+import json
 from pathlib import Path
 from typing import Iterable
 from datetime import datetime
@@ -113,6 +114,37 @@ class SQLiteStore:
         )
         self._conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS plugin_daily_counters (
+                plugin_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                day TEXT NOT NULL,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (plugin_id, action, day)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plugin_once_marks (
+                plugin_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                created_at TEXT DEFAULT '',
+                PRIMARY KEY (plugin_id, key)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plugin_kv (
+                plugin_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value_json TEXT DEFAULT '',
+                PRIMARY KEY (plugin_id, key)
+            )
+            """
+        )
+        self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS schema_version (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 version INTEGER NOT NULL
@@ -148,7 +180,7 @@ class SQLiteStore:
         with self._lock:
             row = self._conn.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
             current = int(row[0]) if row else 0
-            target = 2
+            target = 3
             if current < target:
                 self._ensure_column("topics", "last_synced_post_number", "INTEGER DEFAULT 0")
                 self._backfill_last_synced_post_number()
@@ -183,6 +215,40 @@ class SQLiteStore:
                         posts_fetched INTEGER DEFAULT 0,
                         timings_sent INTEGER DEFAULT 0,
                         notifications_sent INTEGER DEFAULT 0
+                    )
+                    """,
+                )
+                self._ensure_table(
+                    "plugin_daily_counters",
+                    """
+                    CREATE TABLE IF NOT EXISTS plugin_daily_counters (
+                        plugin_id TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        day TEXT NOT NULL,
+                        count INTEGER DEFAULT 0,
+                        PRIMARY KEY (plugin_id, action, day)
+                    )
+                    """,
+                )
+                self._ensure_table(
+                    "plugin_once_marks",
+                    """
+                    CREATE TABLE IF NOT EXISTS plugin_once_marks (
+                        plugin_id TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        created_at TEXT DEFAULT '',
+                        PRIMARY KEY (plugin_id, key)
+                    )
+                    """,
+                )
+                self._ensure_table(
+                    "plugin_kv",
+                    """
+                    CREATE TABLE IF NOT EXISTS plugin_kv (
+                        plugin_id TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        value_json TEXT DEFAULT '',
+                        PRIMARY KEY (plugin_id, key)
                     )
                     """,
                 )
@@ -408,3 +474,136 @@ class SQLiteStore:
             "timings_sent": int(row[2] or 0),
             "notifications_sent": int(row[3] or 0),
         }
+
+    def get_plugin_daily_count(self, plugin_id: str, action: str) -> int:
+        self._ensure_conn()
+        day = datetime.now(self._tz).strftime("%Y-%m-%d")
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT count FROM plugin_daily_counters
+                WHERE plugin_id = ? AND action = ? AND day = ?
+                """,
+                (plugin_id, action, day),
+            ).fetchone()
+        if not row:
+            return 0
+        return int(row[0] or 0)
+
+    def inc_plugin_daily_count(self, plugin_id: str, action: str, delta: int = 1) -> int:
+        self._ensure_conn()
+        day = datetime.now(self._tz).strftime("%Y-%m-%d")
+        with self._lock:
+            self._with_retry(
+                lambda: (
+                    self._conn.execute(
+                        """
+                        INSERT INTO plugin_daily_counters (plugin_id, action, day, count)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(plugin_id, action, day) DO UPDATE SET
+                          count = count + excluded.count
+                        """,
+                        (plugin_id, action, day, int(delta)),
+                    ),
+                    self._conn.commit(),
+                )
+            )
+            row = self._conn.execute(
+                """
+                SELECT count FROM plugin_daily_counters
+                WHERE plugin_id = ? AND action = ? AND day = ?
+                """,
+                (plugin_id, action, day),
+            ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def get_plugin_daily_counts(self, plugin_id: str) -> dict[str, int]:
+        self._ensure_conn()
+        day = datetime.now(self._tz).strftime("%Y-%m-%d")
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT action, count FROM plugin_daily_counters
+                WHERE plugin_id = ? AND day = ?
+                ORDER BY action
+                """,
+                (plugin_id, day),
+            ).fetchall()
+        return {str(action): int(count or 0) for action, count in rows}
+
+    def plugin_once_exists(self, plugin_id: str, key: str) -> bool:
+        self._ensure_conn()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM plugin_once_marks WHERE plugin_id = ? AND key = ?",
+                (plugin_id, key),
+            ).fetchone()
+        return row is not None
+
+    def mark_plugin_once(self, plugin_id: str, key: str) -> None:
+        self._ensure_conn()
+        created_at = datetime.now(self._tz).isoformat()
+        with self._lock:
+            self._with_retry(
+                lambda: (
+                    self._conn.execute(
+                        """
+                        INSERT OR IGNORE INTO plugin_once_marks (plugin_id, key, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (plugin_id, key, created_at),
+                    ),
+                    self._conn.commit(),
+                )
+            )
+
+    def count_plugin_once_marks(self, plugin_id: str) -> int:
+        self._ensure_conn()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM plugin_once_marks WHERE plugin_id = ?",
+                (plugin_id,),
+            ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def get_plugin_kv(self, plugin_id: str, key: str, default: object = None) -> object:
+        self._ensure_conn()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value_json FROM plugin_kv WHERE plugin_id = ? AND key = ?",
+                (plugin_id, key),
+            ).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row[0])
+        except json.JSONDecodeError:
+            return default
+
+    def set_plugin_kv(self, plugin_id: str, key: str, value: object) -> None:
+        self._ensure_conn()
+        value_json = json.dumps(value, ensure_ascii=False)
+        with self._lock:
+            self._with_retry(
+                lambda: (
+                    self._conn.execute(
+                        """
+                        INSERT INTO plugin_kv (plugin_id, key, value_json)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(plugin_id, key) DO UPDATE SET
+                          value_json = excluded.value_json
+                        """,
+                        (plugin_id, key, value_json),
+                    ),
+                    self._conn.commit(),
+                )
+            )
+
+    def list_plugin_kv_keys(self, plugin_id: str) -> list[str]:
+        self._ensure_conn()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key FROM plugin_kv WHERE plugin_id = ? ORDER BY key",
+                (plugin_id,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]

@@ -11,6 +11,7 @@ from discorsair.core.requester import Requester
 from discorsair.core.session import SessionState
 from discorsair.discourse.client import DiscourseClient
 from discorsair.discourse.queued_client import QueuedDiscourseClient
+from discorsair.plugins import PluginManager
 from discorsair.storage.sqlite_store import SQLiteStore
 from discorsair.utils.config import load_app_config, validate_app_config
 from discorsair.utils.logging import setup_logging
@@ -25,6 +26,7 @@ class RuntimeServices:
     base_client: DiscourseClient
     client: QueuedDiscourseClient
     queue: RequestQueue
+    plugin_manager: PluginManager | None
 
     def close(self) -> None:
         try:
@@ -58,7 +60,19 @@ def build_services(app_config: dict[str, Any], settings: RuntimeSettings) -> Run
         queue_cfg = app_config.get("queue", {})
         queue = RequestQueue(maxsize=int(queue_cfg.get("maxsize", 0)))
         client = QueuedDiscourseClient(base_client, queue)
-        return RuntimeServices(store=store, base_client=base_client, client=client, queue=queue)
+        plugin_manager = PluginManager.from_app_config(
+            app_config,
+            client=client,
+            store=store,
+            timezone_name=settings.timezone_name,
+        )
+        return RuntimeServices(
+            store=store,
+            base_client=base_client,
+            client=client,
+            queue=queue,
+            plugin_manager=plugin_manager,
+        )
     except Exception:
         if queue is not None:
             queue.stop()

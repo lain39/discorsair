@@ -56,14 +56,14 @@ def build_runtime_settings(app_config: dict[str, Any], storage_path: str) -> Run
         store=StoreSettings(
             path=storage_path,
             timezone_name=timezone_name,
-            rotate_daily=bool(storage_cfg.get("rotate_daily", False)),
+            rotate_daily=_as_bool(storage_cfg.get("rotate_daily", False), "storage.rotate_daily"),
         ),
         watch=WatchSettings(
-            crawl_enabled=bool(app_config.get("crawl", {}).get("enabled", True)),
-            use_unseen=bool(watch_cfg.get("use_unseen", False)),
+            crawl_enabled=_as_bool(app_config.get("crawl", {}).get("enabled", True), "crawl.enabled"),
+            use_unseen=_as_bool(watch_cfg.get("use_unseen", False), "watch.use_unseen"),
             timings_per_topic=int(watch_cfg.get("timings_per_topic", 30)),
             notify_interval_secs=int(notify_cfg.get("interval_secs", 600)),
-            notify_auto_mark_read=bool(notify_cfg.get("auto_mark_read", False)),
+            notify_auto_mark_read=_as_bool(notify_cfg.get("auto_mark_read", False), "notify.auto_mark_read"),
         ),
         server=ServerSettings(
             host=server_cfg.get("host", "127.0.0.1"),
@@ -72,10 +72,24 @@ def build_runtime_settings(app_config: dict[str, Any], storage_path: str) -> Run
             api_key=server_cfg.get("api_key", ""),
             action_timeout_secs=float(server_cfg.get("action_timeout_secs", 60)),
             interval_secs=int(server_cfg.get("interval_secs", 30)),
-            max_posts_per_interval=server_cfg.get("max_posts_per_interval"),
-            auto_restart=bool(server_cfg.get("auto_restart", True)),
+            max_posts_per_interval=_as_optional_int(server_cfg.get("max_posts_per_interval"), "server.max_posts_per_interval"),
+            auto_restart=_as_bool(server_cfg.get("auto_restart", True), "server.auto_restart"),
             restart_backoff_secs=int(server_cfg.get("restart_backoff_secs", 60)),
             max_restarts=int(server_cfg.get("max_restarts", 0)),
             same_error_stop_threshold=int(server_cfg.get("same_error_stop_threshold", 0)),
         ),
     )
+
+
+def _as_bool(value: Any, path: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{path} must be a boolean")
+
+
+def _as_optional_int(value: Any, path: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{path} must be an integer or null")
+    return value

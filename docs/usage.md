@@ -50,9 +50,9 @@
 - `server.host` / `server.port` 监听地址
 - 默认仅监听 `127.0.0.1`
 - `server.action_timeout_secs` HTTP 控制接口（如 `/like`、`/reply`）的等待超时；超时返回 `504`，不影响 watch；`0` 表示不设超时
-- `server.interval_secs` watch 轮询间隔
-- `server.max_posts_per_interval` 每轮最多补抓的帖子数；只限制后续 `get_posts_by_ids()` 的补抓，不限制 `get_topic()` 首屏返回的帖子
-- `server.schedule` 运行时段（如 `08:00-12:00`）
+- `server.interval_secs` `serve` 模式下 watch 轮询间隔
+- `server.max_posts_per_interval` `serve` 模式下每轮最多补抓的帖子数；只限制后续 `get_posts_by_ids()` 的补抓，不限制 `get_topic()` 首屏返回的帖子
+- `server.schedule` `serve` 模式下的运行时段（如 `08:00-12:00`）
 - `server.auto_restart` watch 线程自动重启
 - `server.restart_backoff_secs` 自动重启间隔
 - `server.max_restarts` 最大重启次数（0 为不限制）
@@ -61,6 +61,7 @@
 - 当 `server.host` 或 `discorsair serve --host` 使用非回环地址时，必须配置 `server.api_key`
 - `serve` 模式下，如果 watch 线程或 HTTP 控制接口命中登录失效 / unresolved challenge，会停止 watch、关闭 HTTP 服务，并以非 0 退出
 - 其中登录失效会把账号标记为 `invalid` 并禁用；其他 fatal 错误会写入 `auth.last_fail` / `auth.last_error`
+- `run/watch` 命令不读取 `server.schedule`，也不会自动回退到 `server.interval_secs` / `server.max_posts_per_interval`
 - `time.timezone` 时区（用于今日统计与运行时段）
 - 模板文件为 JSONC（允许 `//` 注释），程序也支持读取 JSONC
 

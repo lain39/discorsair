@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import random
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any, Callable, Iterable
 from concurrent.futures import TimeoutError
 
+from discorsair.plugins import PluginManager
 from discorsair.storage.sqlite_store import SQLiteStore
 
 from discorsair.discourse.client import DiscourseClient
@@ -19,6 +21,13 @@ from discorsair.utils.notify import Notifier, format_notification
 def _iter_topics(latest: dict[str, Any]) -> Iterable[dict[str, Any]]:
     topic_list = latest.get("topic_list", {})
     return topic_list.get("topics", [])
+
+
+@dataclass
+class TopicTouchResult:
+    remaining_posts: int | None
+    topic: dict[str, Any]
+    content_posts: list[dict[str, Any]]
 
 
 def watch(
@@ -33,6 +42,7 @@ def watch(
     notify_interval_secs: int = 600,
     notify_auto_mark_read: bool = False,
     timings_per_topic: int = 30,
+    plugin_manager: PluginManager | None = None,
     on_success: Callable[[], None] | None = None,
     stop_event: Any | None = None,
     schedule_windows: list[str] | None = None,
@@ -50,6 +60,9 @@ def watch(
                 logging.getLogger(__name__).info("watch: outside schedule, sleep=%ss", delay)
                 _sleep_interruptible(delay, stop_event)
                 continue
+        cycle_state = plugin_manager.new_cycle() if plugin_manager is not None and plugin_manager.has_plugins() else None
+        if plugin_manager is not None and cycle_state is not None:
+            plugin_manager.dispatch("cycle.started", cycle_state, crawl_enabled=crawl_enabled, use_unseen=use_unseen)
         remaining = max_posts_per_interval
         now = time.monotonic()
         if notifier and (now - last_notify_ts) >= notify_interval_secs:
@@ -79,10 +92,17 @@ def watch(
         if on_success:
             on_success()
         topics = list(_iter_topics(latest))
+        if plugin_manager is not None and cycle_state is not None:
+            plugin_manager.dispatch("topics.fetched", cycle_state, topics=topics)
+            topics = plugin_manager.sort_topics(topics, cycle_state)
         logging.getLogger(__name__).info("watch: topics=%s remaining_posts=%s", len(topics), remaining)
         for topic in topics:
             topic_id = int(topic.get("id", 0))
             if topic_id:
+                if plugin_manager is not None and cycle_state is not None:
+                    plugin_manager.dispatch("topic.before_enter", cycle_state, topic_summary=topic)
+                    if plugin_manager.is_topic_skipped(cycle_state, topic_id):
+                        continue
                 title = topic.get("title", "")
                 replies = topic.get("reply_count", 0)
                 views = topic.get("views", 0)
@@ -96,14 +116,48 @@ def watch(
                     title,
                 )
                 try:
-                    remaining = _touch_topic(client, store, topic, topic_id, remaining, crawl_enabled, timings_per_topic)
+                    result = _touch_topic(
+                        client,
+                        store,
+                        topic,
+                        topic_id,
+                        remaining,
+                        crawl_enabled,
+                        timings_per_topic,
+                        stop_event=stop_event,
+                    )
+                    remaining = result.remaining_posts
                     if store is not None:
                         store.inc_stat("topics_seen", 1)
+                    if _stop_requested(stop_event):
+                        break
+                    if plugin_manager is not None and cycle_state is not None:
+                        plugin_manager.dispatch("topic.after_enter", cycle_state, topic_summary=topic, topic=result.topic)
+                        for post in result.content_posts:
+                            plugin_manager.dispatch(
+                                "post.fetched",
+                                cycle_state,
+                                topic_summary=topic,
+                                topic=result.topic,
+                                post=post,
+                            )
+                        if result.content_posts:
+                            plugin_manager.dispatch(
+                                "topic.after_crawl",
+                                cycle_state,
+                                topic_summary=topic,
+                                topic=result.topic,
+                                posts=result.content_posts,
+                            )
                 except TimeoutError:
                     logging.getLogger(__name__).warning("watch: request timeout, skip topic=%s", topic_id)
                     continue
+                if _stop_requested(stop_event):
+                    break
                 if remaining is not None and remaining <= 0:
                     break
+        if plugin_manager is not None and cycle_state is not None:
+            plugin_manager.dispatch("cycle.finished", cycle_state, topics=topics)
         if once:
             _log_watch_summary(store)
             return
@@ -121,21 +175,27 @@ def _touch_topic(
     remaining_posts: int | None,
     crawl_enabled: bool,
     timings_per_topic: int,
-) -> int | None:
+    stop_event: Any | None = None,
+) -> TopicTouchResult:
     topic = client.get_topic(topic_id, track_visit=True, force_load=True)
     post_stream = topic.get("post_stream", {})
     posts = post_stream.get("posts", [])
     stream_ids = post_stream.get("stream", [])
+    content_posts = list(posts) if bool(topic_summary.get("unseen", False)) else []
 
     if posts and crawl_enabled and store is not None:
         store.insert_posts(topic_id, posts)
         store.inc_stat("posts_fetched", len(posts))
 
-    _post_timings(client, store, topic_id, topic_summary, topic, timings_per_topic)
+    _post_timings(client, store, topic_id, topic_summary, topic, timings_per_topic, stop_event=stop_event)
 
     highest = int(topic.get("highest_post_number", 0) or 0)
+    if _stop_requested(stop_event):
+        return TopicTouchResult(remaining_posts=remaining_posts, topic=topic, content_posts=content_posts)
     if not crawl_enabled or store is None:
-        return remaining_posts
+        if not bool(topic_summary.get("unseen", False)):
+            content_posts = []
+        return TopicTouchResult(remaining_posts=remaining_posts, topic=topic, content_posts=content_posts)
 
     last_synced_post_number = store.get_last_synced_post_number(topic_id)
     if highest > 0 and highest <= last_synced_post_number:
@@ -145,10 +205,10 @@ def _touch_topic(
             last_stream_len=len(stream_ids) if stream_ids else 0,
             last_seen_at=topic.get("last_posted_at", "") or "",
         )
-        return remaining_posts
+        return TopicTouchResult(remaining_posts=remaining_posts, topic=topic, content_posts=content_posts)
 
     if not stream_ids:
-        return remaining_posts
+        return TopicTouchResult(remaining_posts=remaining_posts, topic=topic, content_posts=content_posts)
     stream_ids = [int(x) for x in stream_ids if isinstance(x, int) or str(x).isdigit()]
     existing = store.get_existing_post_ids(topic_id, stream_ids)
     missing_all = [pid for pid in stream_ids if pid not in existing]
@@ -162,20 +222,30 @@ def _touch_topic(
             last_stream_len=len(stream_ids),
             last_seen_at=topic.get("last_posted_at", "") or "",
         )
-        return remaining_posts
+        return TopicTouchResult(remaining_posts=remaining_posts, topic=topic, content_posts=content_posts)
     if not missing:
-        return remaining_posts
+        return TopicTouchResult(remaining_posts=remaining_posts, topic=topic, content_posts=content_posts)
 
     # Fetch missing posts in batches of 20
     batch_size = 20
+    backfill_posts: list[dict[str, Any]] = []
+    stopped_early = False
     for i in range(0, len(missing), batch_size):
+        if _stop_requested(stop_event):
+            stopped_early = True
+            break
         batch = missing[i : i + batch_size]
         data = client.get_posts_by_ids(topic_id, batch)
         posts_data = data.get("post_stream", {}).get("posts", [])
         store.insert_posts(topic_id, posts_data)
         store.inc_stat("posts_fetched", len(posts_data))
+        backfill_posts.extend(posts_data)
         if remaining_posts is not None:
             remaining_posts -= len(batch)
+    if backfill_posts:
+        content_posts.extend(sorted(backfill_posts, key=lambda post: int(post.get("post_number", 0) or 0)))
+    if stopped_early:
+        return TopicTouchResult(remaining_posts=remaining_posts, topic=topic, content_posts=content_posts)
 
     last_synced_post_number = highest
     store.upsert_topic(
@@ -184,7 +254,7 @@ def _touch_topic(
         last_stream_len=len(stream_ids),
         last_seen_at=topic.get("last_posted_at", "") or "",
     )
-    return remaining_posts
+    return TopicTouchResult(remaining_posts=remaining_posts, topic=topic, content_posts=content_posts)
 
 
 def _post_timings(
@@ -194,9 +264,12 @@ def _post_timings(
     topic_summary: dict[str, Any],
     topic: dict[str, Any],
     timings_per_topic: int,
+    stop_event: Any | None = None,
 ) -> None:
     highest = int(topic.get("highest_post_number", 0) or 0)
     if highest <= 0:
+        return
+    if _stop_requested(stop_event):
         return
     last_read = int(topic_summary.get("last_read_post_number", 0) or 0)
     if last_read >= highest:
@@ -205,6 +278,8 @@ def _post_timings(
 
     remaining = max(1, timings_per_topic)
     while remaining > 0:
+        if _stop_requested(stop_event):
+            return
         next_posts: list[int] = []
         start = last_read + 1
         if start > highest:
@@ -280,6 +355,10 @@ def _sleep_interruptible(seconds: float, stop_event: Any | None) -> None:
         time.sleep(1)
 
 
+def _stop_requested(stop_event: Any | None) -> bool:
+    return bool(stop_event is not None and stop_event.is_set())
+
+
 def _log_watch_summary(store: SQLiteStore | None) -> None:
     if store is None:
         return
@@ -298,14 +377,10 @@ def _schedule_delay_secs(windows: list[str], timezone_name: str) -> int:
     mins_now = now.hour * 60 + now.minute
     ranges: list[tuple[int, int]] = []
     for w in windows:
-        if "-" not in w:
+        parsed = _parse_schedule_window(w)
+        if parsed is None:
             continue
-        start_s, end_s = w.split("-", 1)
-        try:
-            sh, sm = [int(x) for x in start_s.split(":")]
-            eh, em = [int(x) for x in end_s.split(":")]
-        except ValueError:
-            continue
+        sh, sm, eh, em = parsed
         start = sh * 60 + sm
         end = eh * 60 + em
         ranges.append((start, end))
@@ -329,3 +404,22 @@ def _schedule_delay_secs(windows: list[str], timezone_name: str) -> int:
         next_start = min(r[0] for r in ranges)
         return ((24 * 60 - mins_now) + next_start) * 60
     return 0
+
+
+def _parse_schedule_window(window: str) -> tuple[int, int, int, int] | None:
+    parts = str(window or "").split("-", 1)
+    if len(parts) != 2:
+        return None
+    start_s, end_s = parts
+    start_parts = start_s.split(":")
+    end_parts = end_s.split(":")
+    if len(start_parts) != 2 or len(end_parts) != 2:
+        return None
+    try:
+        sh, sm = [int(x) for x in start_parts]
+        eh, em = [int(x) for x in end_parts]
+    except ValueError:
+        return None
+    if sh > 23 or eh > 23 or sm > 59 or em > 59:
+        return None
+    return sh, sm, eh, em

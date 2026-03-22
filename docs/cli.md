@@ -33,9 +33,11 @@ discorsair run --max-posts-per-interval 200
 
 可选项
 
-- `--interval 30` 轮询间隔（秒）
+- `--interval 30` 轮询间隔（秒，必须 `>= 1`）
 - `--once` 仅跑一轮即退出
 - `--max-posts-per-interval` 每轮最多补抓的帖子数；只限制后续 `get_posts_by_ids()` 的补抓，不限制 `get_topic()` 首屏返回的帖子
+- `run/watch` 不读取 `server.schedule`
+- `run/watch` 的 `interval` 和 `max_posts_per_interval` 以 CLI 参数为准，不回退到 `server.interval_secs` / `server.max_posts_per_interval`
 
 ### 2. `daily`
 
@@ -65,9 +67,11 @@ discorsair watch --max-posts-per-interval 200
 
 可选项
 
-- `--interval 30` 轮询间隔（秒）
+- `--interval 30` 轮询间隔（秒，必须 `>= 1`）
 - `--once` 仅跑一轮即退出
 - `--max-posts-per-interval` 每轮最多补抓的帖子数；只限制后续 `get_posts_by_ids()` 的补抓，不限制 `get_topic()` 首屏返回的帖子
+- `run/watch` 不读取 `server.schedule`
+- `run/watch` 的 `interval` 和 `max_posts_per_interval` 以 CLI 参数为准，不回退到 `server.interval_secs` / `server.max_posts_per_interval`
 
 ### 4. `like`
 
@@ -105,6 +109,7 @@ discorsair serve --host 0.0.0.0 --port 8080
 
 - 如果绑定 `0.0.0.0` 或其他非回环地址，需先配置 `server.api_key`
 - 如果 watch 线程或控制接口触发登录失效 / unresolved challenge，服务会自停并以非 0 退出
+- `server.schedule`、`server.interval_secs`、`server.max_posts_per_interval` 只用于 `serve` 模式里的 watch 线程
 
 可用接口：
 
@@ -136,6 +141,7 @@ discorsair serve --host 0.0.0.0 --port 8080
 ```json
 {
   "running": true,
+  "stopping": false,
   "started_at": "2026-03-17T01:00:00Z",
   "last_tick": "2026-03-17T01:10:00Z",
   "last_error": null,
@@ -158,12 +164,20 @@ discorsair serve --host 0.0.0.0 --port 8080
     "08:00-12:00",
     "14:00-23:00"
   ],
+  "use_schedule": true,
   "use_unseen": false,
   "timings_per_topic": 30,
   "max_posts_per_interval": 200,
   "timezone": "Asia/Shanghai"
 }
 ```
+
+说明：
+
+- `use_schedule` 表示当前运行中的 watch 线程是否真的按 `server.schedule` 控制
+- `stopping == true` 表示已经收到 `POST /watch/stop`，但当前 watch 线程还没完全退出
+- 只有 `use_schedule == true` 时，`next_run` 才有值；手动用 `POST /watch/start {"use_schedule": false}` 启动时，`next_run` 为 `null`
+- `POST /watch/stop` 返回 `{"ok": true}` 只表示停止请求已发出，不等于线程已经完全停止；是否还在收尾看 `stopping`
 
 - `POST /watch/config` 成功示例：
 
@@ -210,7 +224,28 @@ discorsair status
 
 输出：
 
-- `{"stats_total": {...}, "stats_today": {...}, "storage_path": "..."}`
+- `{"stats_total": {...}, "stats_today": {...}, "storage_path": "...", "plugins": {...}}`
+
+其中 `plugins` 会包含：
+
+- `backend`
+  - 启用插件时为 `sqlite` 或 `memory`
+  - 未启用任何插件时为 `null`
+- `runtime_live`
+  - `discorsair status` 下固定为 `false`
+  - 表示这里只是静态/持久态快照，不是运行中插件管理器的实时内存态
+- `items[*].daily_counts`
+  - 插件今日动作计数摘要，例如 `reply` / `like` / `trigger:*`
+- `items[*].once_mark_count`
+  - 插件累计 `once_key` / `mark_done` 标记数
+- `items[*].kv_keys`
+  - 插件已写入的 KV key 列表
+
+说明：
+
+- `discorsair status` 不会导入或实例化插件代码
+- 因此其中的运行态字段，例如 `hook_successes` / `hook_failures` / `disabled`，在 CLI `status` 下会是 `null`
+- 如果要看运行中 watch 线程里的实时插件运行态，用 HTTP `GET /watch/status`
 
 ### 8. `notify test`
 

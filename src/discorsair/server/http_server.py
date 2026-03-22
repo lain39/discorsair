@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import ipaddress
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -18,11 +19,13 @@ from discorsair.core.requester import ChallengeUnresolvedError
 from discorsair.discourse.client import DiscourseAuthError
 from discorsair.discourse.queued_client import QueuedDiscourseClient
 from discorsair.flows.watch import watch
+from discorsair.plugins import PluginManager
 from discorsair.storage.sqlite_store import SQLiteStore
 from discorsair.flows.status import status as status_flow
 from discorsair.utils.notify import Notifier
 
 _UNSET = object()
+_SCHEDULE_WINDOW_RE = re.compile(r"^(?P<start_h>\d{2}):(?P<start_m>\d{2})-(?P<end_h>\d{2}):(?P<end_m>\d{2})$")
 
 
 @dataclass
@@ -49,6 +52,7 @@ class WatchController:
         schedule_windows: list[str],
         notify_interval_secs: int,
         notify_auto_mark_read: bool,
+        plugin_manager: PluginManager | None,
         auto_restart: bool,
         restart_backoff_secs: int,
         max_restarts: int,
@@ -69,6 +73,7 @@ class WatchController:
         self._schedule_windows = schedule_windows
         self._notify_interval_secs = notify_interval_secs
         self._notify_auto_mark_read = notify_auto_mark_read
+        self._plugin_manager = plugin_manager
         self._auto_restart = auto_restart
         self._restart_backoff_secs = restart_backoff_secs
         self._max_restarts = max_restarts
@@ -78,37 +83,43 @@ class WatchController:
         self._on_auth_invalid = on_auth_invalid
         self._on_fatal = on_fatal
         self._runtime = WatchRuntime()
+        self._control_lock = threading.RLock()
+        self._use_schedule = True
         self._last_error_sig: str | None = None
         self._same_error_count = 0
         self._fatal_error: Exception | None = None
         self._sent_notification_ids_mem: set[int] = set()
 
     def start(self, use_schedule: bool = True) -> bool:
-        if self._runtime.thread and self._runtime.thread.is_alive():
-            return False
-        stop_event = threading.Event()
-        self._runtime.stop_event = stop_event
-        self._runtime.started_at = _now()
-        self._runtime.last_tick = _now()
-        self._last_error_sig = None
-        self._same_error_count = 0
-        self._fatal_error = None
+        with self._control_lock:
+            if self._runtime.thread and self._runtime.thread.is_alive():
+                return False
+            stop_event = threading.Event()
+            self._runtime.stop_event = stop_event
+            self._runtime.started_at = _now()
+            self._runtime.last_tick = _now()
+            self._use_schedule = use_schedule
+            self._last_error_sig = None
+            self._same_error_count = 0
+            self._fatal_error = None
 
-        def _run() -> None:
-            restarts = 0
-            while True:
-                try:
-                    self._run_watch_once(stop_event, use_schedule=use_schedule)
-                    return
-                except Exception as exc:  # noqa: BLE001
-                    next_restarts = self._handle_watch_exception(exc, restarts)
-                    if next_restarts is None:
+            def _run() -> None:
+                restarts = 0
+                while True:
+                    if stop_event.is_set():
                         return
-                    restarts = next_restarts
+                    try:
+                        self._run_watch_once(stop_event, use_schedule=use_schedule)
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        next_restarts = self._handle_watch_exception(exc, restarts, stop_event)
+                        if next_restarts is None:
+                            return
+                        restarts = next_restarts
 
-        t = threading.Thread(target=_run, daemon=True)
-        self._runtime.thread = t
-        t.start()
+            t = threading.Thread(target=_run, daemon=True)
+            self._runtime.thread = t
+            t.start()
         logging.getLogger(__name__).info("watch started (schedule=%s)", use_schedule)
         return True
 
@@ -119,12 +130,61 @@ class WatchController:
         timings_per_topic: int | None = None,
         max_posts_per_interval: int | None | object = _UNSET,
     ) -> dict[str, Any]:
-        if use_unseen is not None:
-            self._use_unseen = bool(use_unseen)
-        if timings_per_topic is not None:
-            self._timings_per_topic = max(1, int(timings_per_topic))
-        if max_posts_per_interval is not _UNSET:
-            self._max_posts_per_interval = None if max_posts_per_interval is None else int(max_posts_per_interval)
+        with self._control_lock:
+            next_use_unseen = self._use_unseen
+            next_timings_per_topic = self._timings_per_topic
+            next_max_posts_per_interval = self._max_posts_per_interval
+            if use_unseen is not None:
+                if not isinstance(use_unseen, bool):
+                    raise ValueError("use_unseen must be a boolean")
+                next_use_unseen = use_unseen
+            if timings_per_topic is not None:
+                try:
+                    parsed_timings = int(timings_per_topic)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("timings_per_topic must be an integer") from exc
+                if parsed_timings < 1:
+                    raise ValueError("timings_per_topic must be >= 1")
+                next_timings_per_topic = parsed_timings
+            if max_posts_per_interval is not _UNSET:
+                if max_posts_per_interval is None:
+                    next_max_posts_per_interval = None
+                else:
+                    try:
+                        parsed_max_posts = int(max_posts_per_interval)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("max_posts_per_interval must be an integer or null") from exc
+                    if parsed_max_posts < 0:
+                        raise ValueError("max_posts_per_interval must be >= 0 or null")
+                    next_max_posts_per_interval = parsed_max_posts
+            changed = (
+                next_use_unseen != self._use_unseen
+                or next_timings_per_topic != self._timings_per_topic
+                or next_max_posts_per_interval != self._max_posts_per_interval
+            )
+            if not changed:
+                return {
+                    "ok": True,
+                    "use_unseen": self._use_unseen,
+                    "timings_per_topic": self._timings_per_topic,
+                    "max_posts_per_interval": self._max_posts_per_interval,
+                }
+            running = bool(self._runtime.thread and self._runtime.thread.is_alive())
+            thread = self._runtime.thread
+            stop_event = self._runtime.stop_event
+            use_schedule = self._use_schedule
+            restart_wait_secs = self._stop_wait_timeout_secs()
+            if running and thread is not None and stop_event is not None:
+                stop_event.set()
+                thread.join(timeout=restart_wait_secs)
+                if thread.is_alive():
+                    raise ValueError("watch reconfigure timed out waiting for current loop to stop")
+            self._use_unseen = next_use_unseen
+            self._timings_per_topic = next_timings_per_topic
+            self._max_posts_per_interval = next_max_posts_per_interval
+            if running and thread is not None and stop_event is not None:
+                if not self.start(use_schedule=use_schedule):
+                    raise ValueError("watch reconfigure failed to restart")
         return {
             "ok": True,
             "use_unseen": self._use_unseen,
@@ -141,16 +201,26 @@ class WatchController:
 
     def status(self) -> dict[str, Any]:
         running = bool(self._runtime.thread and self._runtime.thread.is_alive())
-        next_run = _next_run_local(self._schedule_windows, self._timezone_name) if self._schedule_windows else None
+        stop_requested = bool(self._runtime.stop_event and self._runtime.stop_event.is_set())
+        next_run = (
+            _next_run_local(self._schedule_windows, self._timezone_name)
+            if self._use_schedule and self._schedule_windows
+            else None
+        )
         return {
             "running": running,
             "started_at": self._runtime.started_at,
             "last_tick": self._runtime.last_tick,
             "last_error": self._runtime.last_error,
             "last_error_at": self._runtime.last_error_at,
+            "stopping": bool(running and stop_requested),
             "next_run": next_run,
-            **status_flow(self._store),
+            **status_flow(
+                self._store,
+                plugins=self._plugin_manager.snapshot() if self._plugin_manager is not None else None,
+            ),
             "schedule": self._schedule_windows,
+            "use_schedule": self._use_schedule,
             "use_unseen": self._use_unseen,
             "timings_per_topic": self._timings_per_topic,
             "max_posts_per_interval": self._max_posts_per_interval,
@@ -175,6 +245,7 @@ class WatchController:
             notifier=self._notifier,
             notify_interval_secs=self._notify_interval_secs,
             notify_auto_mark_read=self._notify_auto_mark_read,
+            plugin_manager=self._plugin_manager,
             on_success=self._tick,
             stop_event=stop_event,
             schedule_windows=self._schedule_windows if use_schedule else [],
@@ -182,7 +253,7 @@ class WatchController:
             sent_notification_ids_mem=self._sent_notification_ids_mem,
         )
 
-    def _handle_watch_exception(self, exc: Exception, restarts: int) -> int | None:
+    def _handle_watch_exception(self, exc: Exception, restarts: int, stop_event: threading.Event) -> int | None:
         if isinstance(exc, DiscourseAuthError):
             self.handle_auth_invalid(exc, source="watch stopped")
             return None
@@ -217,7 +288,8 @@ class WatchController:
             )
             return None
 
-        time.sleep(max(self._restart_backoff_secs, 1))
+        if stop_event.wait(max(self._restart_backoff_secs, 1)):
+            return None
         return next_restarts
 
     def _record_watch_error_signature(self, exc: Exception) -> int:
@@ -243,6 +315,22 @@ class WatchController:
     def _set_runtime_error(self, message: str) -> None:
         self._runtime.last_error = message
         self._runtime.last_error_at = _now()
+
+    def _watch_request_timeout_secs(self) -> float:
+        inner = getattr(self._client, "_inner", self._client)
+        requester = getattr(inner, "_requester", None)
+        timeout = getattr(requester, "_timeout_secs", None)
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
+            return float(timeout)
+        return 30.0
+
+    def _stop_wait_timeout_secs(self) -> float:
+        return max(
+            float(self._interval_secs),
+            float(self._restart_backoff_secs),
+            self._watch_request_timeout_secs(),
+            1.0,
+        ) + 1.0
 
     def _notify_stop(self, stop_type: str, *, detail: str, extra: dict[str, str] | None = None) -> None:
         if not self._notifier:
@@ -323,14 +411,10 @@ def _next_run_local(windows: list[str], timezone_name: str) -> str | None:
     mins_now = now.hour * 60 + now.minute
     ranges: list[tuple[int, int]] = []
     for w in windows:
-        if "-" not in w:
+        parsed = _parse_schedule_window(w)
+        if parsed is None:
             continue
-        start_s, end_s = w.split("-", 1)
-        try:
-            sh, sm = [int(x) for x in start_s.split(":")]
-            eh, em = [int(x) for x in end_s.split(":")]
-        except ValueError:
-            continue
+        sh, sm, eh, em = parsed
         ranges.append((sh * 60 + sm, eh * 60 + em))
 
     normalized: list[tuple[int, int]] = []
@@ -360,6 +444,19 @@ def _next_run_local(windows: list[str], timezone_name: str) -> str | None:
     return None
 
 
+def _parse_schedule_window(window: str) -> tuple[int, int, int, int] | None:
+    match = _SCHEDULE_WINDOW_RE.fullmatch(str(window or "").strip())
+    if match is None:
+        return None
+    sh = int(match.group("start_h"))
+    sm = int(match.group("start_m"))
+    eh = int(match.group("end_h"))
+    em = int(match.group("end_m"))
+    if sh > 23 or eh > 23 or sm > 59 or em > 59:
+        return None
+    return sh, sm, eh, em
+
+
 class ControlHandler(BaseHTTPRequestHandler):
     server: "ControlServer"  # type: ignore[override]
 
@@ -382,9 +479,12 @@ class ControlHandler(BaseHTTPRequestHandler):
             return {}
         data = self.rfile.read(length).decode("utf-8")
         try:
-            return json.loads(data)
-        except json.JSONDecodeError:
-            return {}
+            payload = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid JSON body") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("JSON body must be an object")
+        return payload
 
     def _send(self, code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -416,7 +516,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/watch/start":
                 data = self._json()
-                use_schedule = bool(data.get("use_schedule", True))
+                use_schedule = _json_bool(data, "use_schedule", default=True)
                 ok = self.server.watch_controller.start(use_schedule=use_schedule)
                 self._send(200, {"ok": ok})
                 return
@@ -424,12 +524,12 @@ class ControlHandler(BaseHTTPRequestHandler):
                 data = self._json()
                 max_posts_per_interval = _UNSET
                 if "max_posts_per_interval" in data:
-                    max_posts_per_interval = data.get("max_posts_per_interval")
+                    max_posts_per_interval = _json_optional_int(data, "max_posts_per_interval")
                 self._send(
                     200,
                     self.server.watch_controller.configure(
-                        use_unseen=data.get("use_unseen") if "use_unseen" in data else None,
-                        timings_per_topic=data.get("timings_per_topic") if "timings_per_topic" in data else None,
+                        use_unseen=_json_bool(data, "use_unseen") if "use_unseen" in data else None,
+                        timings_per_topic=_json_int(data, "timings_per_topic") if "timings_per_topic" in data else None,
                         max_posts_per_interval=max_posts_per_interval,
                     ),
                 )
@@ -440,7 +540,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/like":
                 data = self._json()
-                post_id = int(data.get("post_id", 0))
+                post_id = _json_int(data, "post_id", default=0)
                 emoji = data.get("emoji", "heart")
                 if not post_id:
                     self._send(400, {"error": "post_id required"})
@@ -456,9 +556,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/reply":
                 data = self._json()
-                topic_id = int(data.get("topic_id", 0))
-                raw = data.get("raw", "")
-                category = data.get("category")
+                topic_id = _json_int(data, "topic_id", default=0)
+                raw = _json_string(data, "raw", default="")
+                category = _json_optional_int(data, "category") if "category" in data else None
                 if not topic_id or not raw:
                     self._send(400, {"error": "topic_id and raw required"})
                     return
@@ -473,6 +573,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True, "result": result})
                 return
             self._send(404, {"error": "not found"})
+        except ValueError as exc:
+            logging.getLogger(__name__).warning("http POST bad request: %s", exc)
+            self._send(400, {"error": "bad_request", "detail": str(exc)})
         except TimeoutError:
             logging.getLogger(__name__).warning("http POST timeout")
             self.server.watch_controller.report_error("timeout", "http POST timeout")
@@ -547,3 +650,45 @@ def serve(
         httpd.serve_forever()
     finally:
         httpd.server_close()
+
+
+def _json_bool(data: dict[str, Any], key: str, *, default: bool | None = None) -> bool:
+    if key not in data:
+        if default is None:
+            raise ValueError(f"{key} is required")
+        return default
+    value = data.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
+
+
+def _json_int(data: dict[str, Any], key: str, *, default: int | None = None) -> int:
+    if key not in data:
+        if default is None:
+            raise ValueError(f"{key} is required")
+        return default
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer")
+    return value
+
+
+def _json_optional_int(data: dict[str, Any], key: str) -> int | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer or null")
+    return value
+
+
+def _json_string(data: dict[str, Any], key: str, *, default: str | None = None) -> str:
+    if key not in data:
+        if default is None:
+            raise ValueError(f"{key} is required")
+        return default
+    value = data.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value

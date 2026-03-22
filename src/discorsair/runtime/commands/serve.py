@@ -39,6 +39,7 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
         schedule_windows=schedule,
         notify_interval_secs=context.settings.watch.notify_interval_secs,
         notify_auto_mark_read=context.settings.watch.notify_auto_mark_read,
+        plugin_manager=context.services.plugin_manager,
         auto_restart=server.auto_restart,
         restart_backoff_secs=server.restart_backoff_secs,
         max_restarts=server.max_restarts,
