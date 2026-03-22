@@ -64,6 +64,7 @@ def default_app_config() -> dict[str, Any]:
         "notify": {
             "enabled": False,
             "interval_secs": 600,
+            "auto_mark_read": False,
             "url": "",
             "chat_id": "",
             "prefix": "[Discorsair]",

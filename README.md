@@ -30,6 +30,7 @@ CLI 命令名：`discorsair`
 - 未读优先：`watch.use_unseen`
 - 队列：`queue.maxsize`
 - 通知：`notify.enabled` + `notify.url` + `notify.chat_id`
+- 通知自动已读：`notify.auto_mark_read`（默认关闭；当当前未读通知都已在本地去重状态中时，调用 mark-read 全部标记为已读）
 - 通知前缀：`notify.prefix` / `notify.error_prefix`
 - 服务：`discorsair serve` 启动 HTTP 控制服务
 - 控制接口超时：`server.action_timeout_secs`（`0` 表示不设超时）

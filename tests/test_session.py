@@ -19,6 +19,7 @@ sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions
 
 from discorsair.discourse.client import DiscourseAuthError
 from discorsair.discourse.client import DiscourseClient
+from discorsair.flows.status import status as status_flow
 from discorsair.flows.watch import _poll_notifications
 from discorsair.core.requester import ChallengeUnresolvedError
 from discorsair.server.http_server import WatchController, validate_server_binding
@@ -55,6 +56,9 @@ class _RecordingStore:
 
 
 class _NotificationClient:
+    def __init__(self) -> None:
+        self.mark_read_calls = 0
+
     def get_notifications(self, limit: int = 30, recent: bool = True):
         return {
             "notifications": [
@@ -62,6 +66,10 @@ class _NotificationClient:
                 {"id": 2, "read": False, "created_at": "2026-03-18T00:00:01Z", "data": {"topic_title": "fail"}},
             ]
         }
+
+    def mark_notifications_read(self):
+        self.mark_read_calls += 1
+        return {"ok": True}
 
 
 class _Notifier:
@@ -130,6 +138,7 @@ class WatchAndServerTests(unittest.TestCase):
             "timings_per_topic": 5,
             "schedule_windows": [],
             "notify_interval_secs": 60,
+            "notify_auto_mark_read": False,
             "auto_restart": True,
             "restart_backoff_secs": 1,
             "max_restarts": 0,
@@ -295,15 +304,127 @@ class WatchAndServerTests(unittest.TestCase):
             ("watch stopped: stop_type=max_restarts_exceeded max_restarts=1 detail=boom",),
         )
 
+    def test_watch_controller_reuses_memory_notification_dedupe_across_restarts(self) -> None:
+        controller = self._build_watch_controller(
+            store=None,
+            max_restarts=1,
+        )
+        seen_sets: list[set[int]] = []
+
+        def raise_runtime_error(*args, **kwargs) -> None:
+            seen_sets.append(kwargs["sent_notification_ids_mem"])
+            raise RuntimeError("boom")
+
+        self._start_watch_with_side_effect(controller, raise_runtime_error, patch_sleep=True)
+
+        self.assertEqual(len(seen_sets), 2)
+        self.assertIs(seen_sets[0], seen_sets[1])
+
     def test_poll_notifications_marks_only_successful_sends(self) -> None:
         store = _RecordingStore()
         notifier = _Notifier()
+        client = _NotificationClient()
 
-        _poll_notifications(_NotificationClient(), store, notifier)
+        _poll_notifications(client, store, notifier, auto_mark_read=False)
 
         self.assertEqual([item["id"] for item in store.marked], [1])
         self.assertEqual(store.stats, [("notifications_sent", 1)])
         self.assertEqual(len(notifier.sent), 2)
+        self.assertEqual(client.mark_read_calls, 0)
+
+    def test_poll_notifications_keeps_memory_dedupe_without_store(self) -> None:
+        notifier = _Notifier()
+        sent_ids_mem: set[int] = set()
+        client = _NotificationClient()
+
+        _poll_notifications(client, None, notifier, sent_notification_ids_mem=sent_ids_mem, auto_mark_read=False)
+        _poll_notifications(client, None, notifier, sent_notification_ids_mem=sent_ids_mem, auto_mark_read=False)
+
+        self.assertEqual(sent_ids_mem, {1})
+        self.assertEqual(len(notifier.sent), 3)
+        self.assertEqual(client.mark_read_calls, 0)
+
+    def test_poll_notifications_marks_read_when_all_unread_are_locally_marked(self) -> None:
+        client = _NotificationClient()
+        client.get_notifications = lambda limit=30, recent=True: {
+            "notifications": [
+                {"id": 9, "read": False, "created_at": "2026-03-18T00:00:02Z", "data": {"topic_title": "ok-9"}},
+                {"id": 7, "read": False, "created_at": "2026-03-18T00:00:01Z", "data": {"topic_title": "ok-7"}},
+            ]
+        }
+        notifier = _Notifier()
+
+        _poll_notifications(client, None, notifier, sent_notification_ids_mem=set(), auto_mark_read=True)
+
+        self.assertEqual(client.mark_read_calls, 1)
+
+    def test_poll_notifications_does_not_mark_read_when_any_send_fails(self) -> None:
+        client = _NotificationClient()
+        notifier = _Notifier()
+
+        _poll_notifications(client, None, notifier, sent_notification_ids_mem=set(), auto_mark_read=True)
+
+        self.assertEqual(client.mark_read_calls, 0)
+
+    def test_poll_notifications_persists_partial_success_when_auto_mark_read_enabled(self) -> None:
+        store = _RecordingStore()
+        notifier = _Notifier()
+        client = _NotificationClient()
+
+        _poll_notifications(client, store, notifier, auto_mark_read=True)
+
+        self.assertEqual([item["id"] for item in store.marked], [1])
+        self.assertEqual(store.stats, [("notifications_sent", 1)])
+        self.assertEqual(client.mark_read_calls, 0)
+
+    def test_poll_notifications_memory_dedupe_persists_partial_success_when_auto_mark_read_enabled(self) -> None:
+        notifier = _Notifier()
+        client = _NotificationClient()
+        sent_ids_mem: set[int] = set()
+
+        _poll_notifications(client, None, notifier, sent_notification_ids_mem=sent_ids_mem, auto_mark_read=True)
+
+        self.assertEqual(sent_ids_mem, {1})
+        self.assertEqual(client.mark_read_calls, 0)
+
+    def test_poll_notifications_marks_read_when_all_unread_were_already_locally_marked(self) -> None:
+        notifier = _Notifier()
+        client = _NotificationClient()
+        sent_ids_mem = {1, 2}
+
+        _poll_notifications(client, None, notifier, sent_notification_ids_mem=sent_ids_mem, auto_mark_read=True)
+
+        self.assertEqual(client.mark_read_calls, 1)
+        self.assertEqual(notifier.sent, [])
+
+    def test_poll_notifications_keeps_local_dedupe_when_mark_read_fails(self) -> None:
+        store = _RecordingStore()
+        notifier = _Notifier()
+        client = _NotificationClient()
+        client.get_notifications = lambda limit=30, recent=True: {
+            "notifications": [
+                {"id": 9, "read": False, "created_at": "2026-03-18T00:00:02Z", "data": {"topic_title": "ok-9"}},
+                {"id": 7, "read": False, "created_at": "2026-03-18T00:00:01Z", "data": {"topic_title": "ok-7"}},
+            ]
+        }
+        client.mark_notifications_read = lambda: (_ for _ in ()).throw(RuntimeError("mark-read failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "mark-read failed"):
+            _poll_notifications(client, store, notifier, auto_mark_read=True)
+
+        self.assertEqual([item["id"] for item in store.marked], [9, 7])
+        self.assertEqual(store.stats, [("notifications_sent", 2)])
+
+    def test_status_without_store_reports_storage_disabled(self) -> None:
+        self.assertEqual(
+            status_flow(None),
+            {
+                "storage_enabled": False,
+                "stats_total": None,
+                "stats_today": None,
+                "storage_path": None,
+            },
+        )
 
     def test_post_timings_raises_auth_error_from_json_body(self) -> None:
         client = DiscourseClient(
@@ -313,6 +434,22 @@ class WatchAndServerTests(unittest.TestCase):
 
         with self.assertRaises(DiscourseAuthError):
             client.post_timings(topic_id=1, timings={1: 1000}, topic_time=1000)
+
+    def test_mark_notifications_read_uses_put_request_without_body(self) -> None:
+        requester = _Requester([_Response(200, '{"ok":true}')])
+        client = DiscourseClient(requester=requester, csrf_token="csrf")
+
+        result = client.mark_notifications_read()
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(requester.calls), 1)
+        args, kwargs = requester.calls[0]
+        self.assertEqual(args[0], "put")
+        self.assertEqual(args[1], "/notifications/mark-read")
+        self.assertIsNone(kwargs["data"])
+        self.assertEqual(kwargs["headers"]["discourse-logged-in"], "true")
+        self.assertEqual(kwargs["headers"]["discourse-present"], "true")
+        self.assertNotIn("content-type", kwargs["headers"])
 
     def test_post_timings_retries_bad_csrf_once(self) -> None:
         requester = _Requester(

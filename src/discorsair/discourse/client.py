@@ -132,6 +132,22 @@ class DiscourseClient:
         )
         return resp.json()
 
+    def mark_notifications_read(self) -> Dict[str, Any]:
+        self._ensure_csrf_token()
+        logging.getLogger(__name__).info("discourse: mark_notifications_read")
+        return self._request_json(
+            "put",
+            endpoints.notifications_mark_read(),
+            operation="mark_notifications_read",
+            retry_bad_csrf=True,
+            headers={
+                "X-Requested-With": "XMLHttpRequest",
+                "discourse-logged-in": "true",
+                "discourse-present": "true",
+                "x-csrf-token": self._csrf_token or "",
+            },
+        )
+
     def post_timings(self, topic_id: int, timings: Dict[int, int], topic_time: int, _retried: bool = False) -> None:
         self._ensure_csrf_token()
         logging.getLogger(__name__).info("discourse: post_timings topic=%s posts=%s", topic_id, list(timings.keys()))

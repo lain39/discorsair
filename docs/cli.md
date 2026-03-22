@@ -35,7 +35,7 @@ discorsair run --max-posts-per-interval 200
 
 - `--interval 30` 轮询间隔（秒）
 - `--once` 仅跑一轮即退出
-- `--max-posts-per-interval` 每轮最多抓取的帖子数
+- `--max-posts-per-interval` 每轮最多补抓的帖子数；只限制后续 `get_posts_by_ids()` 的补抓，不限制 `get_topic()` 首屏返回的帖子
 
 ### 2. `daily`
 
@@ -67,7 +67,7 @@ discorsair watch --max-posts-per-interval 200
 
 - `--interval 30` 轮询间隔（秒）
 - `--once` 仅跑一轮即退出
-- `--max-posts-per-interval` 每轮最多抓取的帖子数
+- `--max-posts-per-interval` 每轮最多补抓的帖子数；只限制后续 `get_posts_by_ids()` 的补抓，不限制 `get_topic()` 首屏返回的帖子
 
 ### 4. `like`
 

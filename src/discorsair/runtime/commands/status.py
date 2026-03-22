@@ -9,6 +9,8 @@ from ..types import CommandOutcome
 
 
 def handle_status(settings: RuntimeSettings) -> CommandOutcome:
+    if not settings.watch.crawl_enabled:
+        return CommandOutcome(payload=status_flow(None))
     store = open_store(settings)
     try:
         return CommandOutcome(payload=status_flow(store))

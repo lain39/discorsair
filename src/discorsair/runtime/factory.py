@@ -21,7 +21,7 @@ from .settings import build_runtime_settings
 
 @dataclass
 class RuntimeServices:
-    store: SQLiteStore
+    store: SQLiteStore | None
     base_client: DiscourseClient
     client: QueuedDiscourseClient
     queue: RequestQueue
@@ -30,7 +30,8 @@ class RuntimeServices:
         try:
             self.queue.stop()
         finally:
-            self.store.close()
+            if self.store is not None:
+                self.store.close()
 
 
 def load_runtime_app_config(config_path: str) -> dict[str, Any]:
@@ -51,7 +52,8 @@ def build_services(app_config: dict[str, Any], settings: RuntimeSettings) -> Run
     store: SQLiteStore | None = None
     queue: RequestQueue | None = None
     try:
-        store = open_store(settings)
+        if settings.watch.crawl_enabled:
+            store = open_store(settings)
         base_client = build_client(app_config)
         queue_cfg = app_config.get("queue", {})
         queue = RequestQueue(maxsize=int(queue_cfg.get("maxsize", 0)))

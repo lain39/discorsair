@@ -19,6 +19,7 @@ from discorsair.discourse.client import DiscourseAuthError
 from discorsair.discourse.queued_client import QueuedDiscourseClient
 from discorsair.flows.watch import watch
 from discorsair.storage.sqlite_store import SQLiteStore
+from discorsair.flows.status import status as status_flow
 from discorsair.utils.notify import Notifier
 
 _UNSET = object()
@@ -38,7 +39,7 @@ class WatchController:
     def __init__(
         self,
         client: QueuedDiscourseClient,
-        store: SQLiteStore,
+        store: SQLiteStore | None,
         notifier: Notifier | None,
         interval_secs: int,
         max_posts_per_interval: int | None,
@@ -47,6 +48,7 @@ class WatchController:
         timings_per_topic: int,
         schedule_windows: list[str],
         notify_interval_secs: int,
+        notify_auto_mark_read: bool,
         auto_restart: bool,
         restart_backoff_secs: int,
         max_restarts: int,
@@ -66,6 +68,7 @@ class WatchController:
         self._timings_per_topic = timings_per_topic
         self._schedule_windows = schedule_windows
         self._notify_interval_secs = notify_interval_secs
+        self._notify_auto_mark_read = notify_auto_mark_read
         self._auto_restart = auto_restart
         self._restart_backoff_secs = restart_backoff_secs
         self._max_restarts = max_restarts
@@ -78,6 +81,7 @@ class WatchController:
         self._last_error_sig: str | None = None
         self._same_error_count = 0
         self._fatal_error: Exception | None = None
+        self._sent_notification_ids_mem: set[int] = set()
 
     def start(self, use_schedule: bool = True) -> bool:
         if self._runtime.thread and self._runtime.thread.is_alive():
@@ -145,9 +149,7 @@ class WatchController:
             "last_error": self._runtime.last_error,
             "last_error_at": self._runtime.last_error_at,
             "next_run": next_run,
-            "storage_path": self._store.current_path(),
-            "stats_total": self._store.get_stats_total(),
-            "stats_today": self._store.get_stats_today(),
+            **status_flow(self._store),
             "schedule": self._schedule_windows,
             "use_unseen": self._use_unseen,
             "timings_per_topic": self._timings_per_topic,
@@ -172,10 +174,12 @@ class WatchController:
             timings_per_topic=self._timings_per_topic,
             notifier=self._notifier,
             notify_interval_secs=self._notify_interval_secs,
+            notify_auto_mark_read=self._notify_auto_mark_read,
             on_success=self._tick,
             stop_event=stop_event,
             schedule_windows=self._schedule_windows if use_schedule else [],
             timezone_name=self._timezone_name,
+            sent_notification_ids_mem=self._sent_notification_ids_mem,
         )
 
     def _handle_watch_exception(self, exc: Exception, restarts: int) -> int | None:

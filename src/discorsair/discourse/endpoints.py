@@ -15,6 +15,10 @@ def notifications() -> str:
     return "/notifications"
 
 
+def notifications_mark_read() -> str:
+    return "/notifications/mark-read"
+
+
 def csrf() -> str:
     return "/session/csrf"
 

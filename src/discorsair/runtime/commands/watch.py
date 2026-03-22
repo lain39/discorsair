@@ -24,6 +24,7 @@ def handle_watch_command(args: argparse.Namespace, context: RuntimeCommandContex
             timezone_name=context.settings.timezone_name,
             notifier=context.notifier,
             notify_interval_secs=context.settings.watch.notify_interval_secs,
+            notify_auto_mark_read=context.settings.watch.notify_auto_mark_read,
             on_success=context.state.mark_account_ok,
         )
     finally:

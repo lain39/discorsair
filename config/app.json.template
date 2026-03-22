@@ -81,6 +81,8 @@
   "notify": {
     "enabled": false,
     "interval_secs": 600,
+    // 为 true 时，当当前未读通知都已在本地去重状态中时，调用 mark-read 把通知全部标为已读
+    "auto_mark_read": false,
     // 可由环境变量 DISCORSAIR_NOTIFY_URL 覆盖
     "url": "",
     "chat_id": "",

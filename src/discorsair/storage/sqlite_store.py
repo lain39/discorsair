@@ -84,7 +84,7 @@ class SQLiteStore:
             """
             CREATE TABLE IF NOT EXISTS topics (
                 topic_id INTEGER PRIMARY KEY,
-                last_post_number INTEGER DEFAULT 0,
+                last_synced_post_number INTEGER DEFAULT 0,
                 last_read_post_number INTEGER DEFAULT 0,
                 last_stream_len INTEGER DEFAULT 0,
                 last_seen_at TEXT DEFAULT ''
@@ -148,8 +148,10 @@ class SQLiteStore:
         with self._lock:
             row = self._conn.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
             current = int(row[0]) if row else 0
-            target = 1
+            target = 2
             if current < target:
+                self._ensure_column("topics", "last_synced_post_number", "INTEGER DEFAULT 0")
+                self._backfill_last_synced_post_number()
                 self._ensure_column("topics", "last_read_post_number", "INTEGER DEFAULT 0")
                 self._ensure_table(
                     "notifications_sent",
@@ -199,6 +201,18 @@ class SQLiteStore:
         if column not in existing:
             self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
+    def _backfill_last_synced_post_number(self) -> None:
+        cols = self._conn.execute("PRAGMA table_info(topics)").fetchall()
+        existing = {row[1] for row in cols}
+        if "last_synced_post_number" not in existing or "last_post_number" not in existing:
+            return
+        self._conn.execute(
+            """
+            UPDATE topics
+            SET last_synced_post_number = COALESCE(NULLIF(last_synced_post_number, 0), last_post_number, 0)
+            """
+        )
+
     def get_existing_post_ids(self, topic_id: int, post_ids: Iterable[int]) -> set[int]:
         ids = list(post_ids)
         if not ids:
@@ -242,31 +256,31 @@ class SQLiteStore:
                 )
             )
 
-    def upsert_topic(self, topic_id: int, last_post_number: int, last_stream_len: int, last_seen_at: str) -> None:
+    def upsert_topic(self, topic_id: int, last_synced_post_number: int, last_stream_len: int, last_seen_at: str) -> None:
         self._ensure_conn()
         with self._lock:
             self._with_retry(
                 lambda: (
                     self._conn.execute(
                         """
-                        INSERT INTO topics (topic_id, last_post_number, last_read_post_number, last_stream_len, last_seen_at)
+                        INSERT INTO topics (topic_id, last_synced_post_number, last_read_post_number, last_stream_len, last_seen_at)
                         VALUES (?, ?, 0, ?, ?)
                         ON CONFLICT(topic_id) DO UPDATE SET
-                          last_post_number = excluded.last_post_number,
+                          last_synced_post_number = excluded.last_synced_post_number,
                           last_stream_len = excluded.last_stream_len,
                           last_seen_at = excluded.last_seen_at
                         """,
-                        (topic_id, last_post_number, last_stream_len, last_seen_at),
+                        (topic_id, last_synced_post_number, last_stream_len, last_seen_at),
                     ),
                     self._conn.commit(),
                 )
             )
 
-    def get_last_post_number(self, topic_id: int) -> int:
+    def get_last_synced_post_number(self, topic_id: int) -> int:
         self._ensure_conn()
         with self._lock:
             row = self._conn.execute(
-                "SELECT last_post_number FROM topics WHERE topic_id = ?",
+                "SELECT last_synced_post_number FROM topics WHERE topic_id = ?",
                 (topic_id,),
             ).fetchone()
         if not row:
@@ -291,7 +305,7 @@ class SQLiteStore:
                 lambda: (
                     self._conn.execute(
                         """
-                        INSERT INTO topics (topic_id, last_post_number, last_read_post_number, last_stream_len, last_seen_at)
+                        INSERT INTO topics (topic_id, last_synced_post_number, last_read_post_number, last_stream_len, last_seen_at)
                         VALUES (?, 0, ?, 0, '')
                         ON CONFLICT(topic_id) DO UPDATE SET
                           last_read_post_number = excluded.last_read_post_number

@@ -42,7 +42,13 @@ class RuntimeFactoryTests(unittest.TestCase):
         return RuntimeSettings(
             timezone_name="UTC",
             store=StoreSettings(path="data/test.db", timezone_name="UTC", rotate_daily=False),
-            watch=WatchSettings(crawl_enabled=True, use_unseen=False, timings_per_topic=30, notify_interval_secs=600),
+            watch=WatchSettings(
+                crawl_enabled=True,
+                use_unseen=False,
+                timings_per_topic=30,
+                notify_interval_secs=600,
+                notify_auto_mark_read=False,
+            ),
             server=ServerSettings(
                 host="127.0.0.1",
                 port=8080,
@@ -171,7 +177,7 @@ class RuntimeFactoryTests(unittest.TestCase):
             "storage": {"path": "data/discorsair.db", "auto_per_site": True, "rotate_daily": True},
             "crawl": {"enabled": False},
             "watch": {"use_unseen": True, "timings_per_topic": 9},
-            "notify": {"interval_secs": 321},
+            "notify": {"interval_secs": 321, "auto_mark_read": True},
             "server": {
                 "host": "127.0.0.1",
                 "port": 9090,
@@ -194,6 +200,7 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertEqual(settings.watch.use_unseen, True)
         self.assertEqual(settings.watch.timings_per_topic, 9)
         self.assertEqual(settings.watch.notify_interval_secs, 321)
+        self.assertEqual(settings.watch.notify_auto_mark_read, True)
         self.assertEqual(settings.server.port, 9090)
         self.assertEqual(settings.server.action_timeout_secs, 0.5)
         self.assertEqual(settings.server.max_posts_per_interval, 77)
@@ -214,6 +221,36 @@ class RuntimeFactoryTests(unittest.TestCase):
                     build_services(app_config, self._settings())
 
         store.close.assert_called_once_with()
+
+    def test_build_services_skips_store_when_crawl_disabled(self) -> None:
+        app_config = {
+            "site": {"base_url": "https://forum.example", "timeout_secs": 20},
+            "auth": {"cookie": "_t=1", "proxy": "", "disabled": False},
+            "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 2, "min_interval_secs": 1},
+            "flaresolverr": {"enabled": False, "base_url": "", "request_timeout_secs": 60, "ua_probe_url": ""},
+            "queue": {"maxsize": 0},
+        }
+        settings = RuntimeSettings(
+            timezone_name="UTC",
+            store=StoreSettings(path="data/test.db", timezone_name="UTC", rotate_daily=False),
+            watch=WatchSettings(
+                crawl_enabled=False,
+                use_unseen=False,
+                timings_per_topic=30,
+                notify_interval_secs=600,
+                notify_auto_mark_read=False,
+            ),
+            server=self._settings().server,
+        )
+
+        with patch("discorsair.runtime.factory.open_store") as open_store:
+            services = build_services(app_config, settings)
+
+        try:
+            self.assertIsNone(services.store)
+            open_store.assert_not_called()
+        finally:
+            services.close()
 
     def test_build_client_treats_missing_impersonate_target_as_empty(self) -> None:
         app_config = {

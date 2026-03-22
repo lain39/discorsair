@@ -359,8 +359,8 @@ class SQLiteStoreTests(unittest.TestCase):
                 )
                 self.assertEqual(store.get_existing_post_ids(10, [101, 202]), {101})
 
-                store.upsert_topic(10, last_post_number=8, last_stream_len=3, last_seen_at="2026-03-18T00:00:00Z")
-                self.assertEqual(store.get_last_post_number(10), 8)
+                store.upsert_topic(10, last_synced_post_number=8, last_stream_len=3, last_seen_at="2026-03-18T00:00:00Z")
+                self.assertEqual(store.get_last_synced_post_number(10), 8)
 
                 store.update_last_read_post_number(10, 5)
                 self.assertEqual(store.get_last_read_post_number(10), 5)

@@ -19,6 +19,7 @@ class WatchSettings:
     use_unseen: bool
     timings_per_topic: int
     notify_interval_secs: int
+    notify_auto_mark_read: bool
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ def build_runtime_settings(app_config: dict[str, Any], storage_path: str) -> Run
             use_unseen=bool(watch_cfg.get("use_unseen", False)),
             timings_per_topic=int(watch_cfg.get("timings_per_topic", 30)),
             notify_interval_secs=int(notify_cfg.get("interval_secs", 600)),
+            notify_auto_mark_read=bool(notify_cfg.get("auto_mark_read", False)),
         ),
         server=ServerSettings(
             host=server_cfg.get("host", "127.0.0.1"),

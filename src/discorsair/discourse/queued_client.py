@@ -61,6 +61,13 @@ class QueuedDiscourseClient:
             rate_limit_key="get_notifications",
         )
 
+    def mark_notifications_read(self) -> Dict[str, Any]:
+        return self._call(
+            self._inner.mark_notifications_read,
+            priority=5,
+            rate_limit_key="mark_notifications_read",
+        )
+
     def post_timings(self, topic_id: int, timings: Dict[int, int], topic_time: int) -> None:
         return self._call(
             lambda: self._inner.post_timings(topic_id, timings, topic_time),

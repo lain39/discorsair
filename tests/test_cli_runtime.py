@@ -47,7 +47,13 @@ class CliRuntimeTests(unittest.TestCase):
         return RuntimeSettings(
             timezone_name="UTC",
             store=StoreSettings(path="data/test.db", timezone_name="UTC", rotate_daily=False),
-            watch=WatchSettings(crawl_enabled=True, use_unseen=False, timings_per_topic=30, notify_interval_secs=600),
+            watch=WatchSettings(
+                crawl_enabled=True,
+                use_unseen=False,
+                timings_per_topic=30,
+                notify_interval_secs=600,
+                notify_auto_mark_read=False,
+            ),
             server=ServerSettings(
                 host="127.0.0.1",
                 port=8080,

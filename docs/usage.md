@@ -40,6 +40,7 @@
 - `queue.maxsize` 只限制 ready/running 的任务；已进入 `429` 冷却等待的 delayed 任务不会占满这个容量
 - `notify.enabled` 启用通知
 - `notify.interval_secs` 通知轮询间隔（默认 600 秒）
+- `notify.auto_mark_read` 自动标记通知为已读（默认 `false`）；当当前未读通知都已在本地去重状态中时，会调用一次 mark-read，把通知全部标为已读
 - `notify.url` 通知接口地址（类似 Telegram `sendMessage`）
 - `notify.chat_id` 通知目标
 - `notify.prefix` 消息前缀（默认 `[Discorsair]`）
@@ -50,7 +51,7 @@
 - 默认仅监听 `127.0.0.1`
 - `server.action_timeout_secs` HTTP 控制接口（如 `/like`、`/reply`）的等待超时；超时返回 `504`，不影响 watch；`0` 表示不设超时
 - `server.interval_secs` watch 轮询间隔
-- `server.max_posts_per_interval` 每轮最多抓取帖子数
+- `server.max_posts_per_interval` 每轮最多补抓的帖子数；只限制后续 `get_posts_by_ids()` 的补抓，不限制 `get_topic()` 首屏返回的帖子
 - `server.schedule` 运行时段（如 `08:00-12:00`）
 - `server.auto_restart` watch 线程自动重启
 - `server.restart_backoff_secs` 自动重启间隔
