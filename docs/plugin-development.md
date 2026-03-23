@@ -210,6 +210,7 @@ class Plugin:
 - 所有 hook 统一使用 `(ctx, event)`
 - 你不需要继承基类
 - 不实现的方法会被直接跳过
+- `on_load` 也是 `(ctx, event)`，但它的 `event` 只保证有 `name`
 
 ## Hook 一览
 
@@ -275,7 +276,8 @@ class Plugin:
 注意：
 
 - 这是结构型 hook
-- 不提供 `posts`
+- 不提供单独的 `event.posts`
+- `event.topic` 仍是完整 `get_topic()` 返回值，因此其中可能包含首屏 `post_stream.posts`
 - 不建议在这里做帖子内容处理
 
 ### `on_post_fetched`
@@ -318,12 +320,16 @@ class Plugin:
 
 ## 事件对象
 
-所有 hook 的 `event` 至少都有：
+除 `on_load` 外，其他 hook 的 `event` 至少都有：
 
 - `event.name`
 - `event.ts`
 - `event.cycle_id`
 - `event.plugin_config`
+
+`on_load` 的 `event` 目前只保证有：
+
+- `event.name`
 
 补充说明：
 
@@ -683,4 +689,3 @@ def create_plugin():
 ## 参考
 
 - 示例插件：[`plugins/sample_forum_ops/`](../plugins/sample_forum_ops/)
-- 设计说明：[`docs/future-extensions.md`](./future-extensions.md)

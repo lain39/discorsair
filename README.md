@@ -48,7 +48,8 @@ CLI 命令名：`discorsair`
 - `server.schedule` / `server.interval_secs` / `server.max_posts_per_interval` 仅作用于 `serve` 模式下的 watch 线程；`run/watch` 仍以 CLI 参数为准
 - 启动时按 `app.json -> *.state.json -> 环境变量` 的顺序合并 `auth` 状态
 - 运行时只会写回 `*.state.json` 里的 `auth` 状态，不再修改 `app.json`
-- `*.state.json` 首次运行时会自动生成；如果要手工修复运行时状态，直接修改对应的 `*.state.json`，或者删除它后让运行时重新生成
+- `*.state.json` 不会在启动时预先生成；首次发生受管 `auth` 状态写入时才会自动生成
+- 如果要手工修复运行时状态，直接修改对应的 `*.state.json`，或者删除它后等待后续运行时状态重新写入
 - `serve` 模式下如果遇到登录失效或 unresolved challenge，会停止 watch、关闭 HTTP 服务，并以非 0 退出
 
 ## PostgreSQL

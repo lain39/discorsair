@@ -185,6 +185,7 @@ discorsair serve --host 0.0.0.0 --port 17880
   "last_error": null,
   "last_error_at": null,
   "next_run": "2026-03-17T08:00:00",
+  "storage_enabled": true,
   "storage_path": "data/discorsair.example.db",
   "stats_total": {
     "topics_seen": 120,
@@ -197,6 +198,13 @@ discorsair serve --host 0.0.0.0 --port 17880
     "posts_fetched": 60,
     "timings_sent": 10,
     "notifications_sent": 1
+  },
+  "plugins": {
+    "enabled": true,
+    "count": 1,
+    "backend": "sqlite",
+    "runtime_live": true,
+    "items": []
   },
   "schedule": [
     "08:00-12:00",
@@ -219,7 +227,9 @@ discorsair serve --host 0.0.0.0 --port 17880
 - `POST /watch/stop` 是幂等的：线程正在运行时会返回 `{"ok": true, "already_stopped": false}`；线程在处理这次 stop 请求之前就已经停完时，会返回 `{"ok": true, "already_stopped": true}`
 - `POST /watch/stop` 返回 `{"ok": false}` 只表示当前没有可停止的 watch 实例
 - `POST /watch/stop` 返回 `{"ok": true}` 不等于线程已经完全停止；是否还在收尾看 `stopping`
+- `storage_enabled` 表示当前 watch/status 背后的存储是否已打开
 - `storage_path` 在 SQLite 下是库文件路径；在 PostgreSQL 下是脱敏后的 DSN
+- `plugins` 是当前 watch 线程里插件管理器的实时快照；其中运行态字段不是静态推断值
 
 - `POST /watch/config` 成功示例：
 
@@ -275,7 +285,7 @@ discorsair status
 
 输出：
 
-- `{"stats_total": {...}, "stats_today": {...}, "storage_path": "...", "plugins": {...}}`
+- `{"storage_enabled": true|false, "stats_total": {...}|null, "stats_today": {...}|null, "storage_path": "..."|null, "plugins": {...}}`
 
 其中 `plugins` 会包含：
 

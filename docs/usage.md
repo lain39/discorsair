@@ -1,4 +1,4 @@
-# 使用说明（草案）
+# 使用说明
 
 ## 启动
 
@@ -9,7 +9,7 @@
 - `config/app.json` 写入站点、请求与静态账号配置
 - 运行时状态写入与配置文件同目录同名的 `*.state.json`，例如 `config/app.json -> config/app.state.json`
 - `config/app.json.template` 作为模板参考
-- `*.state.json` 首次运行时自动生成
+- `*.state.json` 不会在启动时预先生成；首次发生受管 `auth` 状态写入时才会自动生成
 - `site.base_url` 站点根地址（必填）
 - `site.timeout_secs` 单次请求超时（秒）
 - `auth.cookie` 登录 cookie；配置中建议只保存 `_t=...`
@@ -21,7 +21,7 @@
 - `auth.disabled=true` 时会阻止当前账号启动
 - `auth.note` 仍保留在 `app.json`
 - `auth.status` / `auth.disabled` / `auth.last_ok` / `auth.last_fail` / `auth.last_error` 主要记录在对应的 `*.state.json`
-- 如果你想手工修复账号状态或覆盖运行时记录，直接修改对应的 `*.state.json`，或者删除它后让运行时重新生成
+- 如果你想手工修复账号状态或覆盖运行时记录，直接修改对应的 `*.state.json`，或者删除它后等待后续运行时状态重新写入
 - `request.user_agent` 为空时，优先使用 `impersonate_target` 对应的内置 UA；若没有映射且启用了 FlareSolverr，则会通过 `ua_probe_url`（默认 `data:,`）获取
 - `request.impersonate_target` 指定 `curl_cffi` impersonate 目标；缺省或显式留空都会按空值处理，运行时再依赖内置 UA 映射、UA 探测或后续推断来决定
 - UA 探测只用于获取 `userAgent`，不会携带当前站点 cookie，也不会把 probe 返回的 cookie 写回账号状态
