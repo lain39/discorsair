@@ -64,6 +64,9 @@ class _Store:
         self.post_ids: set[int] = set()
         self.last_synced_post_number = 0
         self.upserts: list[tuple[int, int, int, str]] = []
+        self.topic_details: list[tuple[dict, dict]] = []
+        self.started_cycles: list[tuple[str, str]] = []
+        self.finished_cycles: list[dict[str, object]] = []
 
     def insert_posts(self, topic_id: int, posts) -> None:
         for post in posts:
@@ -78,9 +81,43 @@ class _Store:
     def get_existing_post_ids(self, topic_id: int, post_ids) -> set[int]:
         return {post_id for post_id in post_ids if post_id in self.post_ids}
 
-    def upsert_topic(self, topic_id: int, last_synced_post_number: int, last_stream_len: int, last_seen_at: str) -> None:
+    def upsert_topic_detail(self, topic_summary: dict, topic: dict) -> None:
+        self.topic_details.append((topic_summary, topic))
+
+    def upsert_topic_crawl_state(self, topic_id: int, last_synced_post_number: int, last_stream_len: int) -> None:
         self.last_synced_post_number = last_synced_post_number
-        self.upserts.append((topic_id, last_synced_post_number, last_stream_len, last_seen_at))
+        self.upserts.append((topic_id, last_synced_post_number, last_stream_len, ""))
+
+    def begin_watch_cycle(self, cycle_id: str, started_at: str) -> None:
+        self.started_cycles.append((cycle_id, started_at))
+
+    def finish_watch_cycle(
+        self,
+        cycle_id: str,
+        *,
+        ended_at: str,
+        topics_fetched: int,
+        topics_entered: int,
+        posts_fetched: int,
+        notifications_sent: int,
+        success: bool,
+        error_text: str = "",
+    ) -> None:
+        self.finished_cycles.append(
+            {
+                "cycle_id": cycle_id,
+                "ended_at": ended_at,
+                "topics_fetched": topics_fetched,
+                "topics_entered": topics_entered,
+                "posts_fetched": posts_fetched,
+                "notifications_sent": notifications_sent,
+                "success": success,
+                "error_text": error_text,
+            }
+        )
+
+    def get_stats_today(self) -> dict[str, int]:
+        return {"topics_seen": 0, "posts_fetched": 0, "timings_sent": 0, "notifications_sent": 0}
 
 
 class FlowTests(unittest.TestCase):
@@ -142,6 +179,22 @@ class FlowTests(unittest.TestCase):
         watch(client, store=None, interval_secs=1, once=True, crawl_enabled=False, timings_per_topic=1)
 
         self.assertEqual(client.posts_by_ids_calls, [])
+
+    def test_watch_marks_cycle_failed_when_topic_fetch_crashes(self) -> None:
+        client = _Client()
+        client.get_latest = lambda: {"topic_list": {"topics": [{"id": 123, "title": "hello"}]}}
+        client.get_topic = lambda topic_id, track_visit=True, force_load=True: (_ for _ in ()).throw(RuntimeError("boom"))
+        store = _Store()
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            watch(client, store=store, interval_secs=1, once=True, crawl_enabled=True, timings_per_topic=1)
+
+        self.assertEqual(len(store.started_cycles), 1)
+        self.assertEqual(len(store.finished_cycles), 1)
+        self.assertEqual(store.finished_cycles[0]["topics_fetched"], 1)
+        self.assertEqual(store.finished_cycles[0]["topics_entered"], 0)
+        self.assertEqual(store.finished_cycles[0]["success"], False)
+        self.assertEqual(store.finished_cycles[0]["error_text"], "boom")
 
     def test_touch_topic_updates_synced_progress_when_initial_posts_cover_stream(self) -> None:
         client = _Client()

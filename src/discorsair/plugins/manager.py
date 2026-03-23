@@ -19,11 +19,11 @@ from zoneinfo import ZoneInfo
 
 from discorsair.plugins.backend import MemoryPluginStateBackend
 from discorsair.plugins.backend import PluginStateBackend
-from discorsair.plugins.backend import SQLitePluginStateBackend
+from discorsair.plugins.backend import StorePluginStateBackend
+from discorsair.storage import StoreBackend
 from discorsair.plugins.validation import VALID_HOOKS
 from discorsair.plugins.validation import VALID_PERMISSIONS
 from discorsair.plugins.validation import validate_plugins_app_config
-from discorsair.storage.sqlite_store import SQLiteStore
 from discorsair.utils.jsonc import loads as jsonc_loads
 
 _HOOK_METHODS = {
@@ -112,7 +112,7 @@ class PluginContext:
         self._execution_state = execution_state
         self._pending_topic_scores: dict[int, float] = {}
         self._pending_skipped_topics: dict[int, str] = {}
-        self._pending_action_logs: list[tuple[str, str, tuple[Any, ...]]] = []
+        self._pending_action_logs: list[dict[str, Any]] = []
         self.logger = plugin.logger
         self.config = plugin.config
         self.plugin_id = plugin.plugin_id
@@ -120,39 +120,92 @@ class PluginContext:
     def now(self) -> datetime:
         return self._manager.now()
 
+    def _cycle_id(self) -> str:
+        return self._cycle_state.cycle_id if self._cycle_state is not None else ""
+
+    def _log_action(
+        self,
+        action: str,
+        *,
+        status: str,
+        reason: str = "",
+        topic_id: int | None = None,
+        post_id: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        self._manager.log_plugin_action(
+            plugin_id=self.plugin_id,
+            hook_name=self._hook,
+            cycle_id=self._cycle_id(),
+            action=action,
+            status=status,
+            reason=reason,
+            topic_id=topic_id,
+            post_id=post_id,
+            extra=extra,
+        )
+
     def prioritize_topic(self, topic_id: int, score: float) -> dict[str, Any]:
         if not self._ensure_hook_active():
+            self._log_action("prioritize_topic", status="rejected", reason="hook_cancelled")
             return {"ok": False, "reason": "hook_cancelled"}
         if self._hook != "topics.fetched":
+            self._log_action("prioritize_topic", status="rejected", reason="unsupported_hook")
             return {"ok": False, "reason": "unsupported_hook"}
         if not self._require_permission("topics.reorder"):
+            self._log_action("prioritize_topic", status="rejected", reason="permission_denied")
             return {"ok": False, "reason": "permission_denied"}
         if self._cycle_state is None:
+            self._log_action("prioritize_topic", status="rejected", reason="no_cycle")
             return {"ok": False, "reason": "no_cycle"}
         topic_id = int(topic_id or 0)
         if topic_id <= 0:
+            self._log_action("prioritize_topic", status="rejected", reason="invalid_topic_id")
             return {"ok": False, "reason": "invalid_topic_id"}
         self._pending_topic_scores[topic_id] = float(self._pending_topic_scores.get(topic_id, 0.0)) + float(score)
         self._pending_action_logs.append(
-            ("prioritize_topic", "plugin action: action=prioritize_topic topic_id=%s score=%s", (topic_id, score))
+            {
+                "action": "prioritize_topic",
+                "message": "plugin action: action=prioritize_topic topic_id=%s score=%s",
+                "args": (topic_id, score),
+                "status": "applied",
+                "reason": "",
+                "topic_id": topic_id,
+                "post_id": None,
+                "extra": {"score": float(score)},
+            }
         )
         return {"ok": True}
 
     def skip_topic(self, topic_id: int, reason: str = "") -> dict[str, Any]:
         if not self._ensure_hook_active():
+            self._log_action("skip_topic", status="rejected", reason="hook_cancelled")
             return {"ok": False, "reason": "hook_cancelled"}
         if self._hook not in {"topics.fetched", "topic.before_enter"}:
+            self._log_action("skip_topic", status="rejected", reason="unsupported_hook")
             return {"ok": False, "reason": "unsupported_hook"}
         if not self._require_permission("topics.skip"):
+            self._log_action("skip_topic", status="rejected", reason="permission_denied")
             return {"ok": False, "reason": "permission_denied"}
         if self._cycle_state is None:
+            self._log_action("skip_topic", status="rejected", reason="no_cycle")
             return {"ok": False, "reason": "no_cycle"}
         topic_id = int(topic_id or 0)
         if topic_id <= 0:
+            self._log_action("skip_topic", status="rejected", reason="invalid_topic_id")
             return {"ok": False, "reason": "invalid_topic_id"}
         self._pending_skipped_topics[topic_id] = reason
         self._pending_action_logs.append(
-            ("skip_topic", "plugin action: action=skip_topic topic_id=%s reason=%s", (topic_id, reason))
+            {
+                "action": "skip_topic",
+                "message": "plugin action: action=skip_topic topic_id=%s reason=%s",
+                "args": (topic_id, reason),
+                "status": "applied",
+                "reason": reason,
+                "topic_id": topic_id,
+                "post_id": None,
+                "extra": {},
+            }
         )
         return {"ok": True, "reason": reason}
 
@@ -163,11 +216,14 @@ class PluginContext:
 
     def set_kv(self, key: str, value: Any) -> dict[str, Any]:
         if not self._ensure_hook_active():
+            self._log_action("set_kv", status="rejected", reason="hook_cancelled", extra={"key": key})
             return {"ok": False, "reason": "hook_cancelled"}
         if not self._require_permission("storage.write"):
+            self._log_action("set_kv", status="rejected", reason="permission_denied", extra={"key": key})
             return {"ok": False, "reason": "permission_denied"}
         self._manager.backend.set_kv(self.plugin_id, key, value)
         self._manager.record_action(self.plugin_id, "set_kv")
+        self._log_action("set_kv", status="applied", extra={"key": key})
         self.logger.info("plugin action: action=set_kv key=%s", key)
         return {"ok": True}
 
@@ -181,10 +237,14 @@ class PluginContext:
 
     def record_trigger(self, key: str) -> int:
         if not self._ensure_hook_active():
+            self._log_action("record_trigger", status="rejected", reason="hook_cancelled", extra={"key": key})
             return 0
         if not self._require_permission("storage.write"):
+            self._log_action("record_trigger", status="rejected", reason="permission_denied", extra={"key": key})
             return 0
-        return self._manager.backend.inc_daily_count(self.plugin_id, f"trigger:{key}", delta=1)
+        count = self._manager.backend.inc_daily_count(self.plugin_id, f"trigger:{key}", delta=1)
+        self._log_action("record_trigger", status="applied", extra={"key": key, "count": count})
+        return count
 
     def was_done(self, key: str) -> bool:
         if not self._require_permission("storage.read"):
@@ -193,32 +253,60 @@ class PluginContext:
 
     def mark_done(self, key: str) -> dict[str, Any]:
         if not self._ensure_hook_active():
+            self._log_action("mark_done", status="rejected", reason="hook_cancelled", extra={"key": key})
             return {"ok": False, "reason": "hook_cancelled"}
         if not self._require_permission("storage.write"):
+            self._log_action("mark_done", status="rejected", reason="permission_denied", extra={"key": key})
             return {"ok": False, "reason": "permission_denied"}
         self._manager.backend.mark_done(self.plugin_id, key)
         self._manager.record_action(self.plugin_id, "mark_done")
+        self._log_action("mark_done", status="applied", extra={"key": key})
         self.logger.info("plugin action: action=mark_done key=%s", key)
         return {"ok": True}
 
     def reply(self, topic_id: int, content: str, *, once_key: str | None = None, category: int | None = None) -> dict[str, Any]:
         if not self._ensure_hook_active():
+            self._log_action("reply", status="rejected", reason="hook_cancelled", topic_id=topic_id)
             return {"ok": False, "reason": "hook_cancelled"}
         if not self._require_permission("reply.create"):
+            self._log_action("reply", status="rejected", reason="permission_denied", topic_id=topic_id)
             return {"ok": False, "reason": "permission_denied"}
         if not content:
+            self._log_action("reply", status="rejected", reason="empty_content", topic_id=topic_id)
             return {"ok": False, "reason": "empty_content"}
         if once_key and self._manager.backend.was_done(self.plugin_id, once_key):
             self._manager.record_action(self.plugin_id, "reply.skipped")
+            self._log_action(
+                "reply",
+                status="skipped",
+                reason="once_key_exists",
+                topic_id=topic_id,
+                extra={"once_key": once_key, "category": category},
+            )
             self.logger.info("plugin action: action=reply acted=false reason=once_key_exists topic_id=%s", topic_id)
             return {"ok": True, "acted": False, "reason": "once_key_exists"}
         limit = int(self._plugin.limits.get("reply_per_day", 0) or 0)
         if limit > 0 and self._manager.backend.get_daily_count(self.plugin_id, "reply") >= limit:
             self._manager.record_action(self.plugin_id, "reply.skipped")
+            self._log_action(
+                "reply",
+                status="rejected",
+                reason="daily_limit_exceeded",
+                topic_id=topic_id,
+                extra={"once_key": once_key, "category": category},
+            )
             self.logger.info("plugin action: action=reply acted=false reason=daily_limit_exceeded topic_id=%s", topic_id)
             return {"ok": False, "reason": "daily_limit_exceeded"}
         result = self._manager.client.reply(topic_id=topic_id, raw=content, category=category)
         if not self._ensure_hook_active():
+            self._log_action(
+                "reply",
+                status="rejected",
+                reason="hook_cancelled",
+                topic_id=topic_id,
+                post_id=int(result.get("post", {}).get("id", 0) or 0) or None,
+                extra={"once_key": once_key, "category": category},
+            )
             self.logger.warning("plugin action cancelled after reply request completed: topic_id=%s", topic_id)
             return {"ok": False, "reason": "hook_cancelled"}
         post = result.get("post", {})
@@ -226,6 +314,13 @@ class PluginContext:
         if once_key:
             self._manager.backend.mark_done(self.plugin_id, once_key)
         self._manager.record_action(self.plugin_id, "reply.acted")
+        self._log_action(
+            "reply",
+            status="applied",
+            topic_id=topic_id,
+            post_id=int(post.get("id", 0) or 0) or None,
+            extra={"once_key": once_key, "category": category},
+        )
         self.logger.info("plugin action: action=reply acted=true topic_id=%s post_id=%s", topic_id, post.get("id"))
         return {
             "ok": True,
@@ -238,11 +333,25 @@ class PluginContext:
 
     def like(self, post: dict[str, Any], *, emoji: str = "heart") -> dict[str, Any]:
         if not self._ensure_hook_active():
+            self._log_action("like", status="rejected", reason="hook_cancelled")
             return {"ok": False, "reason": "hook_cancelled"}
         if not self._require_permission("post.like"):
+            self._log_action(
+                "like",
+                status="rejected",
+                reason="permission_denied",
+                post_id=int(post.get("id", 0) or 0) or None,
+            )
             return {"ok": False, "reason": "permission_denied"}
         if post.get("current_user_reaction"):
             self._manager.record_action(self.plugin_id, "like.skipped")
+            self._log_action(
+                "like",
+                status="skipped",
+                reason="already_reacted",
+                post_id=int(post.get("id", 0) or 0) or None,
+                extra={"emoji": emoji},
+            )
             self.logger.info(
                 "plugin action: action=like acted=false reason=already_reacted post_id=%s",
                 int(post.get("id", 0) or 0),
@@ -251,6 +360,13 @@ class PluginContext:
         limit = int(self._plugin.limits.get("like_per_day", 0) or 0)
         if limit > 0 and self._manager.backend.get_daily_count(self.plugin_id, "like") >= limit:
             self._manager.record_action(self.plugin_id, "like.skipped")
+            self._log_action(
+                "like",
+                status="rejected",
+                reason="daily_limit_exceeded",
+                post_id=int(post.get("id", 0) or 0) or None,
+                extra={"emoji": emoji},
+            )
             self.logger.info(
                 "plugin action: action=like acted=false reason=daily_limit_exceeded post_id=%s",
                 int(post.get("id", 0) or 0),
@@ -258,13 +374,22 @@ class PluginContext:
             return {"ok": False, "reason": "daily_limit_exceeded"}
         post_id = int(post.get("id", 0) or 0)
         if post_id <= 0:
+            self._log_action("like", status="rejected", reason="invalid_post", extra={"emoji": emoji})
             return {"ok": False, "reason": "invalid_post"}
         result = self._manager.client.toggle_reaction(post_id, emoji)
         if not self._ensure_hook_active():
+            self._log_action(
+                "like",
+                status="rejected",
+                reason="hook_cancelled",
+                post_id=post_id,
+                extra={"emoji": emoji},
+            )
             self.logger.warning("plugin action cancelled after like request completed: post_id=%s", post_id)
             return {"ok": False, "reason": "hook_cancelled"}
         self._manager.backend.inc_daily_count(self.plugin_id, "like", delta=1)
         self._manager.record_action(self.plugin_id, "like.acted")
+        self._log_action("like", status="applied", post_id=post_id, extra={"emoji": emoji})
         self.logger.info("plugin action: action=like acted=true post_id=%s emoji=%s", post_id, emoji)
         return {
             "ok": True,
@@ -286,9 +411,17 @@ class PluginContext:
         return self._execution_state is None or not self._execution_state.cancelled.is_set()
 
     def commit_cycle_changes(self) -> None:
-        for action, message, args in self._pending_action_logs:
-            self._manager.record_action(self.plugin_id, action)
-            self.logger.info(message, *args)
+        for item in self._pending_action_logs:
+            self._manager.record_action(self.plugin_id, item["action"])
+            self.logger.info(item["message"], *item["args"])
+            self._log_action(
+                item["action"],
+                status=str(item.get("status", "applied") or "applied"),
+                reason=str(item.get("reason", "") or ""),
+                topic_id=item.get("topic_id"),
+                post_id=item.get("post_id"),
+                extra=item.get("extra"),
+            )
         self._pending_action_logs.clear()
         if self._cycle_state is None:
             return
@@ -342,7 +475,7 @@ class PluginManager:
         app_config: dict[str, Any],
         *,
         client: Any,
-        store: SQLiteStore | None,
+        store: StoreBackend | None,
         timezone_name: str,
         initialize: bool = True,
         instantiate: bool = True,
@@ -365,7 +498,7 @@ class PluginManager:
             loaded_plugins.append(cls._load_plugin(manifest_path, plugin_id, item_cfg, plugins_cfg, instantiate=instantiate))
         backend: PluginStateBackend
         if store is not None:
-            backend = SQLitePluginStateBackend(store)
+            backend = StorePluginStateBackend(store)
         else:
             backend = MemoryPluginStateBackend(timezone_name)
         return cls(
@@ -627,6 +760,31 @@ class PluginManager:
             if runtime_state is None:
                 return
             runtime_state.action_counts[action] = int(runtime_state.action_counts.get(action, 0)) + 1
+
+    def log_plugin_action(
+        self,
+        *,
+        plugin_id: str,
+        hook_name: str,
+        cycle_id: str,
+        action: str,
+        status: str,
+        reason: str = "",
+        topic_id: int | None = None,
+        post_id: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        self.backend.log_action(
+            cycle_id=cycle_id,
+            plugin_id=plugin_id,
+            hook_name=hook_name,
+            action=action,
+            status=status,
+            reason=reason,
+            topic_id=topic_id,
+            post_id=post_id,
+            extra=extra,
+        )
 
     def _run_plugin_hook(self, plugin: LoadedPlugin, hook: str, ctx: PluginContext, event: Any) -> None:
         method_name = "on_load" if hook == "on_load" else _HOOK_METHODS.get(hook, "")

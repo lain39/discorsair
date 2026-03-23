@@ -31,7 +31,9 @@ from discorsair.cli import _build_parser, main
 from discorsair.discourse.client import DiscourseAuthError
 from discorsair.core.requester import ChallengeUnresolvedError
 from discorsair.runtime.commands import RuntimeCommandContext, handle_notify_test, handle_authenticated_command
+from discorsair.runtime.commands.transfer import handle_import_command
 from discorsair.runtime.commands.status import handle_status
+from discorsair.runtime.runner import DiscorsairRuntime
 from discorsair.runtime.state import RuntimeStateStore
 from discorsair.runtime.settings import RuntimeSettings, StoreSettings, WatchSettings, ServerSettings
 from discorsair.runtime.types import CommandOutcome
@@ -58,7 +60,15 @@ class CliRuntimeTests(unittest.TestCase):
     def _settings(self) -> RuntimeSettings:
         return RuntimeSettings(
             timezone_name="UTC",
-            store=StoreSettings(path="data/test.db", timezone_name="UTC", rotate_daily=False),
+            store=StoreSettings(
+                backend="sqlite",
+                path="data/test.db",
+                lock_dir="data/locks",
+                timezone_name="UTC",
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+            ),
             watch=WatchSettings(
                 crawl_enabled=True,
                 use_unseen=False,
@@ -125,11 +135,17 @@ class CliRuntimeTests(unittest.TestCase):
             state_path = self._state_path(config_path)
             config = {
                 "_path": str(config_path),
-                "_env_override_paths": [("auth", "cookie"), ("server", "api_key"), ("notify", "url")],
+                "_env_override_paths": [
+                    ("auth", "cookie"),
+                    ("server", "api_key"),
+                    ("notify", "url"),
+                    ("storage", "postgres", "dsn"),
+                ],
                 "site": {"base_url": "https://forum.example", "timeout_secs": 20},
                 "auth": {"cookie": "_t=env-cookie", "last_ok": "", "status": "active", "disabled": False},
                 "server": {"api_key": "env-key"},
                 "notify": {"url": "https://env-notify.example"},
+                "storage": {"backend": "postgres", "postgres": {"dsn": "postgresql://env-user:env-pass@127.0.0.1:5432/discorsair"}},
             }
             state = RuntimeStateStore(config)
 
@@ -140,6 +156,7 @@ class CliRuntimeTests(unittest.TestCase):
             self.assertIn("last_ok", saved["auth"])
             self.assertNotIn("server", saved)
             self.assertNotIn("notify", saved)
+            self.assertNotIn("storage", saved)
 
     def test_state_store_rewrites_jsonc_config_as_plain_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -614,9 +631,25 @@ class CliRuntimeTests(unittest.TestCase):
                 exit_code = main(["status", "--config", "custom.json"])
 
         self.assertEqual(exit_code, 0)
-        factory.assert_called_once_with("custom.json")
+        factory.assert_called_once_with("custom.json", require_auth_cookie=False)
         runtime.run.assert_called_once()
         self.assertEqual(json.loads(stdout.getvalue()), {"ok": True, "action": "status"})
+
+    def test_main_requires_auth_cookie_for_authenticated_commands_only(self) -> None:
+        runtime = Mock()
+        runtime.run.return_value = CommandOutcome(exit_code=0, payload=None)
+
+        with patch("discorsair.cli.DiscorsairRuntime.from_config_path", return_value=runtime) as factory:
+            main(["watch"])
+            main(["export", "--output", "tmp/export"])
+            main(["notify", "test"])
+
+        self.assertEqual(factory.call_args_list[0].args, ("config/app.json",))
+        self.assertEqual(factory.call_args_list[0].kwargs, {"require_auth_cookie": True})
+        self.assertEqual(factory.call_args_list[1].args, ("config/app.json",))
+        self.assertEqual(factory.call_args_list[1].kwargs, {"require_auth_cookie": False})
+        self.assertEqual(factory.call_args_list[2].args, ("config/app.json",))
+        self.assertEqual(factory.call_args_list[2].kwargs, {"require_auth_cookie": False})
 
     def test_watch_parser_rejects_negative_max_posts_per_interval(self) -> None:
         parser = _build_parser()
@@ -636,6 +669,165 @@ class CliRuntimeTests(unittest.TestCase):
             parser.parse_args(["run", "--interval", "0"])
         with self.assertRaises(SystemExit):
             parser.parse_args(["run", "--interval", "-1"])
+
+    def test_export_parser_accepts_output_dir(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["export", "--output", "tmp/export"])
+        self.assertEqual(args.command, "export")
+        self.assertEqual(args.output, "tmp/export")
+
+    def test_import_parser_requires_input_dir(self) -> None:
+        parser = _build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["import"])
+        args = parser.parse_args(["import", "--input", "tmp/export"])
+        self.assertEqual(args.command, "import")
+        self.assertEqual(args.input, "tmp/export")
+
+    def test_runtime_export_uses_direct_handler_without_opening_services(self) -> None:
+        runtime = DiscorsairRuntime(
+            {
+                "_path": "config/app.json",
+                "site": {"base_url": "https://forum.example"},
+                "auth": {"cookie": "_t=1"},
+                "server": {},
+                "notify": {},
+            }
+        )
+        args = types.SimpleNamespace(command="export", output="tmp/export")
+
+        with patch("discorsair.runtime.runner.handle_export_command", return_value=CommandOutcome(payload={"ok": True})) as handler:
+            with patch.object(runtime, "_open_services") as open_services:
+                outcome = runtime.run(args)
+
+        self.assertEqual(outcome.payload, {"ok": True})
+        handler.assert_called_once_with(runtime._app_config, runtime._settings, output_dir="tmp/export")
+        open_services.assert_not_called()
+
+    def test_runtime_import_uses_direct_handler_without_opening_services(self) -> None:
+        runtime = DiscorsairRuntime(
+            {
+                "_path": "config/app.json",
+                "site": {"base_url": "https://forum.example"},
+                "auth": {"cookie": "_t=1"},
+                "server": {},
+                "notify": {},
+            }
+        )
+        args = types.SimpleNamespace(command="import", input="tmp/export")
+
+        with patch("discorsair.runtime.runner.handle_import_command", return_value=CommandOutcome(payload={"ok": True})) as handler:
+            with patch.object(runtime, "_open_services") as open_services:
+                outcome = runtime.run(args)
+
+        self.assertEqual(outcome.payload, {"ok": True})
+        handler.assert_called_once_with(runtime._app_config, runtime._settings, input_dir="tmp/export")
+        open_services.assert_not_called()
+
+    def test_runtime_like_uses_services_without_crawl_resources(self) -> None:
+        runtime = DiscorsairRuntime(
+            {
+                "_path": "config/app.json",
+                "site": {"base_url": "https://forum.example"},
+                "auth": {"cookie": "_t=1"},
+                "server": {},
+                "notify": {},
+            }
+        )
+        args = types.SimpleNamespace(command="like", post=1, emoji="heart")
+        services = Mock()
+
+        with patch.object(runtime, "_open_services", return_value=services) as open_services:
+            with patch("discorsair.runtime.runner.handle_authenticated_command", return_value=CommandOutcome(payload={"ok": True})):
+                runtime.run(args)
+
+        open_services.assert_called_once_with(with_crawl_resources=False, with_plugins=False)
+
+    def test_handle_import_command_validates_bundle_before_opening_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            export_dir = root / "broken-export"
+            export_dir.mkdir()
+            (export_dir / "meta.json").write_text(json.dumps({"format": "discorsair-ndjson-v1"}), encoding="utf-8")
+            settings = self._settings()
+            app_config = {"_path": str(root / "config" / "app.json")}
+
+            with patch("discorsair.runtime.commands.transfer.import_backend") as import_backend:
+                with self.assertRaisesRegex(ValueError, "import meta missing source_site_key"):
+                    handle_import_command(app_config, settings, input_dir=str(export_dir))
+
+            import_backend.assert_not_called()
+
+    def test_handle_status_with_missing_sqlite_does_not_create_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "missing.db"
+            settings = RuntimeSettings(
+                timezone_name="UTC",
+                store=StoreSettings(
+                    backend="sqlite",
+                    path=str(db_path),
+                    lock_dir=str(Path(tmpdir) / "locks"),
+                    timezone_name="UTC",
+                    site_key="forum.example",
+                    account_name="main",
+                    base_url="https://forum.example",
+                ),
+                watch=WatchSettings(
+                    crawl_enabled=True,
+                    use_unseen=False,
+                    timings_per_topic=30,
+                    notify_interval_secs=600,
+                    notify_auto_mark_read=False,
+                ),
+                server=self._settings().server,
+            )
+
+            outcome = handle_status({"_path": str(Path(tmpdir) / "config" / "app.json")}, settings)
+
+            self.assertFalse(db_path.exists())
+            self.assertEqual(outcome.payload["storage_enabled"], False)
+
+    def test_handle_status_with_missing_sqlite_reports_memory_plugin_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "missing.db"
+            settings = RuntimeSettings(
+                timezone_name="UTC",
+                store=StoreSettings(
+                    backend="sqlite",
+                    path=str(db_path),
+                    lock_dir=str(Path(tmpdir) / "locks"),
+                    timezone_name="UTC",
+                    site_key="forum.example",
+                    account_name="main",
+                    base_url="https://forum.example",
+                ),
+                watch=WatchSettings(
+                    crawl_enabled=True,
+                    use_unseen=False,
+                    timings_per_topic=30,
+                    notify_interval_secs=600,
+                    notify_auto_mark_read=False,
+                ),
+                server=self._settings().server,
+            )
+            app_config = {
+                "_path": str(Path(tmpdir) / "config" / "app.json"),
+                "plugins": {"items": {"demo": {"enabled": True}}},
+            }
+            plugin_manager = Mock()
+            plugin_manager.snapshot.return_value = {
+                "enabled": True,
+                "count": 1,
+                "backend": "memory",
+                "runtime_live": False,
+                "items": [{"plugin_id": "demo"}],
+            }
+
+            with patch("discorsair.runtime.commands.status.PluginManager.from_app_config", return_value=plugin_manager):
+                outcome = handle_status(app_config, settings)
+
+            self.assertEqual(outcome.payload["plugins"]["backend"], "memory")
+            self.assertEqual(outcome.payload["plugins"]["runtime_live"], False)
 
     def test_handle_notify_test_without_notifier_returns_reason(self) -> None:
         outcome = handle_notify_test(None)
@@ -658,8 +850,14 @@ class CliRuntimeTests(unittest.TestCase):
             "items": [{"plugin_id": "demo"}],
         }
 
-        with patch("discorsair.runtime.commands.status.PluginManager.from_app_config", return_value=plugin_manager):
-            outcome = handle_status(app_config, self._settings())
+        store = Mock()
+        store.get_stats_total.return_value = {"topics_seen": 1}
+        store.get_stats_today.return_value = {"topics_seen": 1}
+        store.current_path.return_value = "data/test.db"
+
+        with patch("discorsair.runtime.commands.status.open_store", return_value=store):
+            with patch("discorsair.runtime.commands.status.PluginManager.from_app_config", return_value=plugin_manager):
+                outcome = handle_status(app_config, self._settings())
 
         self.assertEqual(outcome.payload["plugins"]["enabled"], True)
         self.assertEqual(outcome.payload["plugins"]["items"], [{"plugin_id": "demo"}])
@@ -730,7 +928,15 @@ class CliRuntimeTests(unittest.TestCase):
             }
             settings = RuntimeSettings(
                 timezone_name="UTC",
-                store=StoreSettings(path="data/test.db", timezone_name="UTC", rotate_daily=False),
+                store=StoreSettings(
+                    backend="sqlite",
+                    path="data/test.db",
+                    lock_dir="data/locks",
+                    timezone_name="UTC",
+                    site_key="forum.example",
+                    account_name="main",
+                    base_url="https://forum.example",
+                ),
                 watch=WatchSettings(
                     crawl_enabled=False,
                     use_unseen=False,
@@ -782,7 +988,15 @@ class CliRuntimeTests(unittest.TestCase):
             }
             settings = RuntimeSettings(
                 timezone_name="UTC",
-                store=StoreSettings(path="data/test.db", timezone_name="UTC", rotate_daily=False),
+                store=StoreSettings(
+                    backend="sqlite",
+                    path="data/test.db",
+                    lock_dir="data/locks",
+                    timezone_name="UTC",
+                    site_key="forum.example",
+                    account_name="main",
+                    base_url="https://forum.example",
+                ),
                 watch=WatchSettings(
                     crawl_enabled=False,
                     use_unseen=False,

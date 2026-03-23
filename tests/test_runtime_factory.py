@@ -19,7 +19,7 @@ sys.modules.setdefault("curl_cffi", types.SimpleNamespace(requests=fake_requests
 sys.modules.setdefault("curl_cffi.requests", fake_requests)
 sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions)
 
-from discorsair.runtime.factory import build_client, build_notifier, build_services, load_runtime_app_config, load_settings, resolve_storage_path
+from discorsair.runtime.factory import build_client, build_notifier, build_services, load_runtime_app_config, load_settings, open_store, resolve_storage_path
 from discorsair.runtime.settings import RuntimeSettings, ServerSettings, StoreSettings, WatchSettings
 from discorsair.utils.config import derive_runtime_state_path
 
@@ -42,7 +42,15 @@ class RuntimeFactoryTests(unittest.TestCase):
     def _settings(self) -> RuntimeSettings:
         return RuntimeSettings(
             timezone_name="UTC",
-            store=StoreSettings(path="data/test.db", timezone_name="UTC", rotate_daily=False),
+            store=StoreSettings(
+                backend="sqlite",
+                path="data/test.db",
+                lock_dir="data/locks",
+                timezone_name="UTC",
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+            ),
             watch=WatchSettings(
                 crawl_enabled=True,
                 use_unseen=False,
@@ -68,12 +76,37 @@ class RuntimeFactoryTests(unittest.TestCase):
     def test_resolve_storage_path_uses_site_suffix_when_enabled(self) -> None:
         app_config = {
             "site": {"base_url": "https://meta.example.com/forum"},
-            "storage": {"path": "data/discorsair.db", "auto_per_site": True},
+            "storage": {"backend": "sqlite", "path": "data/discorsair.db", "auto_per_site": True},
         }
         self.assertEqual(
             resolve_storage_path(app_config),
             "data/discorsair.meta.example.com_forum.db",
         )
+
+    def test_resolve_storage_path_returns_postgres_dsn_for_postgres_backend(self) -> None:
+        app_config = {
+            "site": {"base_url": "https://meta.example.com/forum"},
+            "storage": {
+                "backend": "postgres",
+                "postgres": {"dsn": "postgresql://user:pass@localhost:5432/discorsair"},
+            },
+        }
+        self.assertEqual(
+            resolve_storage_path(app_config),
+            "postgresql://user:pass@localhost:5432/discorsair",
+        )
+
+    def test_load_runtime_app_config_requires_postgres_dsn_when_backend_is_postgres(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "storage": {"backend": "postgres", "postgres": {"dsn": ""}}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.storage.postgres.dsn is required when backend=postgres"):
+            self._load_runtime_app_config(config_text)
 
     def test_build_notifier_prefixes_account_name(self) -> None:
         app_config = {
@@ -133,6 +166,28 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertEqual(app_config["_state_path"], str(derive_runtime_state_path(config_path)))
         self.assertIn(("auth", "cookie"), app_config["_env_override_paths"])
         self.assertIn(("server", "api_key"), app_config["_env_override_paths"])
+
+    def test_load_runtime_app_config_supports_postgres_dsn_env_override(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "storage": {
+    "backend": "postgres",
+    "postgres": {"dsn": ""}
+  }
+}
+"""
+        app_config, _ = self._load_runtime_app_config(
+            config_text,
+            env={"DISCORSAIR_POSTGRES_DSN": "postgresql://env-user:env-pass@127.0.0.1:5432/discorsair"},
+        )
+
+        self.assertEqual(
+            app_config["storage"]["postgres"]["dsn"],
+            "postgresql://env-user:env-pass@127.0.0.1:5432/discorsair",
+        )
+        self.assertIn(("storage", "postgres", "dsn"), app_config["_env_override_paths"])
 
     def test_load_runtime_app_config_prefers_state_file_over_app_cookie(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -238,6 +293,18 @@ class RuntimeFactoryTests(unittest.TestCase):
 """
 
         with self.assertRaisesRegex(ValueError, "config.queue.timeout_secs has been removed"):
+            self._load_runtime_app_config(config_text)
+
+    def test_load_runtime_app_config_rejects_removed_storage_rotate_daily(self) -> None:
+        config_text = """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"},
+  "storage": {"rotate_daily": true}
+}
+"""
+
+        with self.assertRaisesRegex(ValueError, "config.storage.rotate_daily has been removed"):
             self._load_runtime_app_config(config_text)
 
     def test_load_runtime_app_config_rejects_non_object_site(self) -> None:
@@ -374,7 +441,8 @@ class RuntimeFactoryTests(unittest.TestCase):
         app_config = {
             "site": {"base_url": "https://meta.example.com/forum"},
             "time": {"timezone": "UTC"},
-            "storage": {"path": "data/discorsair.db", "auto_per_site": True, "rotate_daily": True},
+            "auth": {"name": "main"},
+            "storage": {"path": "data/discorsair.db", "auto_per_site": True},
             "crawl": {"enabled": False},
             "watch": {"use_unseen": True, "timings_per_topic": 9},
             "notify": {"interval_secs": 321, "auto_mark_read": True},
@@ -394,8 +462,12 @@ class RuntimeFactoryTests(unittest.TestCase):
         }
         settings = load_settings(app_config)
         self.assertEqual(settings.store.path, "data/discorsair.meta.example.com_forum.db")
+        self.assertEqual(settings.store.backend, "sqlite")
+        self.assertEqual(settings.store.lock_dir, "data/locks")
         self.assertEqual(settings.store.timezone_name, "UTC")
-        self.assertEqual(settings.store.rotate_daily, True)
+        self.assertEqual(settings.store.site_key, "meta.example.com_forum")
+        self.assertEqual(settings.store.account_name, "main")
+        self.assertEqual(settings.store.base_url, "https://meta.example.com/forum")
         self.assertEqual(settings.watch.crawl_enabled, False)
         self.assertEqual(settings.watch.use_unseen, True)
         self.assertEqual(settings.watch.timings_per_topic, 9)
@@ -405,20 +477,70 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertEqual(settings.server.action_timeout_secs, 0.5)
         self.assertEqual(settings.server.max_posts_per_interval, 77)
 
-    def test_build_services_closes_store_when_client_setup_fails(self) -> None:
+    def test_load_settings_keeps_postgres_dsn_and_lock_dir(self) -> None:
         app_config = {
-            "site": {"base_url": "https://forum.example", "timeout_secs": 20},
-            "auth": {"cookie": "_t=1", "proxy": "", "disabled": False},
-            "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 2, "min_interval_secs": 1},
-            "flaresolverr": {"enabled": False, "base_url": "", "request_timeout_secs": 60, "ua_probe_url": ""},
-            "queue": {"maxsize": 0},
+            "site": {"base_url": "https://meta.example.com/forum"},
+            "time": {"timezone": "UTC"},
+            "auth": {"name": "main"},
+            "storage": {
+                "backend": "postgres",
+                "lock_dir": "/tmp/discorsair-locks",
+                "postgres": {"dsn": "postgresql://user:pass@localhost:5432/discorsair"},
+            },
+            "crawl": {"enabled": True},
+            "watch": {"use_unseen": False, "timings_per_topic": 9},
+            "notify": {"interval_secs": 321, "auto_mark_read": False},
+            "server": {
+                "host": "127.0.0.1",
+                "port": 9090,
+                "schedule": [],
+                "api_key": "k",
+                "action_timeout_secs": 0.5,
+                "interval_secs": 15,
+                "max_posts_per_interval": 77,
+                "auto_restart": False,
+                "restart_backoff_secs": 22,
+                "max_restarts": 3,
+                "same_error_stop_threshold": 4,
+            },
         }
-        store = Mock()
 
-        with patch("discorsair.runtime.factory.open_store", return_value=store):
-            with patch("discorsair.runtime.factory.build_client", side_effect=RuntimeError("boom")):
-                with self.assertRaisesRegex(RuntimeError, "boom"):
-                    build_services(app_config, self._settings())
+        settings = load_settings(app_config)
+
+        self.assertEqual(settings.store.backend, "postgres")
+        self.assertEqual(settings.store.path, "postgresql://user:pass@localhost:5432/discorsair")
+        self.assertEqual(settings.store.lock_dir, "/tmp/discorsair-locks")
+
+    def test_build_services_closes_store_when_client_setup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_config = {
+                "_path": str(Path(tmpdir) / "config" / "app.json"),
+                "site": {"base_url": "https://forum.example", "timeout_secs": 20},
+                "auth": {"cookie": "_t=1", "proxy": "", "disabled": False},
+                "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 2, "min_interval_secs": 1},
+                "flaresolverr": {"enabled": False, "base_url": "", "request_timeout_secs": 60, "ua_probe_url": ""},
+                "queue": {"maxsize": 0},
+            }
+            settings = RuntimeSettings(
+                timezone_name="UTC",
+                store=StoreSettings(
+                    backend="sqlite",
+                    path=str(Path(tmpdir) / "discorsair.db"),
+                    lock_dir=str(Path(tmpdir) / "locks"),
+                    timezone_name="UTC",
+                    site_key="forum.example",
+                    account_name="main",
+                    base_url="https://forum.example",
+                ),
+                watch=self._settings().watch,
+                server=self._settings().server,
+            )
+            store = Mock()
+
+            with patch("discorsair.runtime.factory.open_store", return_value=store):
+                with patch("discorsair.runtime.factory.build_client", side_effect=RuntimeError("boom")):
+                    with self.assertRaisesRegex(RuntimeError, "boom"):
+                        build_services(app_config, settings)
 
         store.close.assert_called_once_with()
 
@@ -432,7 +554,15 @@ class RuntimeFactoryTests(unittest.TestCase):
         }
         settings = RuntimeSettings(
             timezone_name="UTC",
-            store=StoreSettings(path="data/test.db", timezone_name="UTC", rotate_daily=False),
+            store=StoreSettings(
+                backend="sqlite",
+                path="data/test.db",
+                lock_dir="data/locks",
+                timezone_name="UTC",
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+            ),
             watch=WatchSettings(
                 crawl_enabled=False,
                 use_unseen=False,
@@ -451,6 +581,154 @@ class RuntimeFactoryTests(unittest.TestCase):
             open_store.assert_not_called()
         finally:
             services.close()
+
+    def test_build_services_skips_store_and_lock_when_crawl_resources_not_requested(self) -> None:
+        app_config = {
+            "site": {"base_url": "https://forum.example", "timeout_secs": 20},
+            "auth": {"cookie": "_t=1", "proxy": "", "disabled": False},
+            "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 2, "min_interval_secs": 1},
+            "flaresolverr": {"enabled": False, "base_url": "", "request_timeout_secs": 60, "ua_probe_url": ""},
+            "queue": {"maxsize": 0},
+        }
+
+        with patch("discorsair.runtime.factory.open_store") as open_store:
+            services = build_services(app_config, self._settings(), with_crawl_resources=False)
+
+        try:
+            self.assertIsNone(services.store)
+            self.assertIsNone(services.crawl_lock)
+            open_store.assert_not_called()
+        finally:
+            services.close()
+
+    def test_build_services_skips_plugin_manager_when_not_requested(self) -> None:
+        app_config = {
+            "site": {"base_url": "https://forum.example", "timeout_secs": 20},
+            "auth": {"cookie": "_t=1", "proxy": "", "disabled": False},
+            "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 2, "min_interval_secs": 1},
+            "flaresolverr": {"enabled": False, "base_url": "", "request_timeout_secs": 60, "ua_probe_url": ""},
+            "queue": {"maxsize": 0},
+            "plugins": {"items": {"demo": {"enabled": True}}},
+        }
+
+        with patch("discorsair.runtime.factory.PluginManager.from_app_config") as plugin_factory:
+            services = build_services(app_config, self._settings(), with_crawl_resources=False, with_plugins=False)
+
+        try:
+            self.assertIsNone(services.plugin_manager)
+            plugin_factory.assert_not_called()
+        finally:
+            services.close()
+
+    def test_build_services_rejects_second_crawl_for_same_site_until_first_releases_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "discorsair.db")
+            app_config = {
+                "_path": str(Path(tmpdir) / "config" / "app.json"),
+                "site": {"base_url": "https://forum.example", "timeout_secs": 20},
+                "auth": {"name": "main", "cookie": "_t=1", "proxy": "", "disabled": False},
+                "request": {"impersonate_target": "chrome110", "user_agent": "", "max_retries": 2, "min_interval_secs": 1},
+                "flaresolverr": {"enabled": False, "base_url": "", "request_timeout_secs": 60, "ua_probe_url": ""},
+                "queue": {"maxsize": 0},
+                "storage": {"path": db_path, "auto_per_site": False},
+            }
+            settings = RuntimeSettings(
+                timezone_name="UTC",
+                store=StoreSettings(
+                    backend="sqlite",
+                    path=db_path,
+                    lock_dir=str(Path(tmpdir) / "locks"),
+                    timezone_name="UTC",
+                    site_key="forum.example",
+                    account_name="main",
+                    base_url="https://forum.example",
+                ),
+                watch=WatchSettings(
+                    crawl_enabled=True,
+                    use_unseen=False,
+                    timings_per_topic=30,
+                    notify_interval_secs=600,
+                    notify_auto_mark_read=False,
+                ),
+                server=self._settings().server,
+            )
+
+            first = build_services(app_config, settings)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "crawl already running for site=forum.example"):
+                    build_services(app_config, settings)
+            finally:
+                first.close()
+
+            second = build_services(app_config, settings)
+            try:
+                self.assertIsNotNone(second.crawl_lock)
+            finally:
+                second.close()
+
+    def test_open_store_uses_postgres_backend_when_configured(self) -> None:
+        settings = RuntimeSettings(
+            timezone_name="UTC",
+            store=StoreSettings(
+                backend="postgres",
+                path="postgresql://user:pass@localhost:5432/discorsair",
+                lock_dir="data/locks",
+                timezone_name="UTC",
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+            ),
+            watch=WatchSettings(
+                crawl_enabled=True,
+                use_unseen=False,
+                timings_per_topic=30,
+                notify_interval_secs=600,
+                notify_auto_mark_read=False,
+            ),
+            server=self._settings().server,
+        )
+
+        with patch("discorsair.runtime.factory.PostgresStore", return_value=Mock()) as pg_cls:
+            result = open_store(settings)
+
+        self.assertIs(result, pg_cls.return_value)
+        pg_cls.assert_called_once()
+
+    def test_open_store_passes_read_only_flags_to_postgres_backend(self) -> None:
+        settings = RuntimeSettings(
+            timezone_name="UTC",
+            store=StoreSettings(
+                backend="postgres",
+                path="postgresql://user:pass@localhost:5432/discorsair",
+                lock_dir="data/locks",
+                timezone_name="UTC",
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+            ),
+            watch=WatchSettings(
+                crawl_enabled=True,
+                use_unseen=False,
+                timings_per_topic=30,
+                notify_interval_secs=600,
+                notify_auto_mark_read=False,
+            ),
+            server=self._settings().server,
+        )
+
+        with patch("discorsair.runtime.factory.PostgresStore", return_value=Mock()) as pg_cls:
+            open_store(settings, initialize=False, ensure_metadata=False, read_only=True)
+
+        pg_cls.assert_called_once_with(
+            "postgresql://user:pass@localhost:5432/discorsair",
+            site_key="forum.example",
+            account_name="main",
+            base_url="https://forum.example",
+            timezone_name="UTC",
+            initialize=False,
+            ensure_metadata=False,
+            read_only=True,
+        )
 
     def test_build_client_treats_missing_impersonate_target_as_empty(self) -> None:
         app_config = {

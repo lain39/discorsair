@@ -19,7 +19,7 @@ from discorsair.discourse.client import DiscourseAuthError
 from discorsair.discourse.queued_client import QueuedDiscourseClient
 from discorsair.flows.watch import watch
 from discorsair.plugins import PluginManager
-from discorsair.storage.sqlite_store import SQLiteStore
+from discorsair.storage import StoreBackend
 from discorsair.flows.status import status as status_flow
 from discorsair.utils.notify import Notifier
 
@@ -41,7 +41,7 @@ class WatchController:
     def __init__(
         self,
         client: QueuedDiscourseClient,
-        store: SQLiteStore | None,
+        store: StoreBackend | None,
         notifier: Notifier | None,
         interval_secs: int,
         max_posts_per_interval: int | None,
@@ -192,11 +192,20 @@ class WatchController:
         }
 
     def stop(self) -> bool:
-        if not self._runtime.stop_event:
-            return False
-        logging.getLogger(__name__).info("watch stop requested")
-        self._finalize_stop()
-        return True
+        return bool(self.stop_result()["ok"])
+
+    def stop_result(self) -> dict[str, bool]:
+        with self._control_lock:
+            thread = self._runtime.thread
+            if thread is None:
+                return {"ok": False, "already_stopped": False}
+            if not thread.is_alive():
+                return {"ok": True, "already_stopped": True}
+            if not self._runtime.stop_event:
+                return {"ok": False, "already_stopped": False}
+            logging.getLogger(__name__).info("watch stop requested")
+            self._finalize_stop()
+            return {"ok": True, "already_stopped": False}
 
     def status(self) -> dict[str, Any]:
         running = bool(self._runtime.thread and self._runtime.thread.is_alive())
@@ -212,6 +221,7 @@ class WatchController:
             "last_tick": self._runtime.last_tick,
             "last_error": self._runtime.last_error,
             "last_error_at": self._runtime.last_error_at,
+            "stop_requested": stop_requested,
             "stopping": bool(running and stop_requested),
             "next_run": next_run,
             **status_flow(
@@ -534,8 +544,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 )
                 return
             if self.path == "/watch/stop":
-                ok = self.server.watch_controller.stop()
-                self._send(200, {"ok": ok})
+                self._send(200, self.server.watch_controller.stop_result())
                 return
             if self.path == "/like":
                 data = self._json()

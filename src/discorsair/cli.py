@@ -43,6 +43,12 @@ def _build_parser() -> argparse.ArgumentParser:
     reply_p.add_argument("--raw", required=True)
     reply_p.add_argument("--category", type=int, default=None)
 
+    export_p = sub.add_parser("export", help="Export storage to NDJSON")
+    export_p.add_argument("--output", default="export", help="Output directory for NDJSON export")
+
+    import_p = sub.add_parser("import", help="Import storage from NDJSON")
+    import_p.add_argument("--input", required=True, help="Input directory containing NDJSON export")
+
     sub.add_parser("status", help="Show status")
 
     notify_p = sub.add_parser("notify", help="Notify helpers")
@@ -103,7 +109,11 @@ def main(argv: list[str] | None = None) -> int:
         _write_template(args.path)
         return 0
 
-    outcome = DiscorsairRuntime.from_config_path(args.config).run(args)
+    require_auth_cookie = not (
+        args.command in {"status", "export", "import"}
+        or (args.command == "notify" and args.notify_cmd == "test")
+    )
+    outcome = DiscorsairRuntime.from_config_path(args.config, require_auth_cookie=require_auth_cookie).run(args)
     _render_outcome(outcome)
     return outcome.exit_code
 

@@ -43,3 +43,42 @@ jobs:
 
       - name: Check package metadata
         run: uv run --group dev python -m twine check dist/*
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: discorsair_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d discorsair_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync --group dev --extra postgres
+
+      - name: PostgreSQL integration tests
+        env:
+          DISCORSAIR_PG_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/discorsair_test
+        run: uv run --extra postgres python -m unittest tests.test_postgres_integration

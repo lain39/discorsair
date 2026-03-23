@@ -8,7 +8,7 @@ import threading
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from discorsair.storage.sqlite_store import SQLiteStore
+from discorsair.storage import StoreBackend
 
 
 class PluginStateBackend:
@@ -34,6 +34,21 @@ class PluginStateBackend:
 
     def snapshot_plugin_state(self, plugin_id: str) -> dict[str, Any]:
         raise NotImplementedError
+
+    def log_action(
+        self,
+        *,
+        cycle_id: str,
+        plugin_id: str,
+        hook_name: str,
+        action: str,
+        status: str,
+        reason: str = "",
+        topic_id: int | None = None,
+        post_id: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        return None
 
 
 class MemoryPluginStateBackend(PluginStateBackend):
@@ -97,11 +112,12 @@ class MemoryPluginStateBackend(PluginStateBackend):
             }
 
 
-class SQLitePluginStateBackend(PluginStateBackend):
-    kind = "sqlite"
+class StorePluginStateBackend(PluginStateBackend):
+    kind = "store"
 
-    def __init__(self, store: SQLiteStore) -> None:
+    def __init__(self, store: StoreBackend) -> None:
         self._store = store
+        self.kind = store.backend_name()
 
     def get_kv(self, plugin_id: str, key: str, default: Any = None) -> Any:
         return self._store.get_plugin_kv(plugin_id, key, default=default)
@@ -127,3 +143,28 @@ class SQLitePluginStateBackend(PluginStateBackend):
             "once_mark_count": self._store.count_plugin_once_marks(plugin_id),
             "kv_keys": self._store.list_plugin_kv_keys(plugin_id),
         }
+
+    def log_action(
+        self,
+        *,
+        cycle_id: str,
+        plugin_id: str,
+        hook_name: str,
+        action: str,
+        status: str,
+        reason: str = "",
+        topic_id: int | None = None,
+        post_id: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        self._store.log_plugin_action(
+            cycle_id=cycle_id,
+            plugin_id=plugin_id,
+            hook_name=hook_name,
+            action=action,
+            status=status,
+            reason=reason,
+            topic_id=topic_id,
+            post_id=post_id,
+            extra=extra,
+        )

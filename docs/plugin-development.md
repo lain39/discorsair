@@ -276,7 +276,7 @@ class Plugin:
 
 - 这是结构型 hook
 - 不提供 `posts`
-- 不建议在这里做帖子内容分析
+- 不建议在这里做帖子内容处理
 
 ### `on_post_fetched`
 
@@ -305,7 +305,7 @@ class Plugin:
 
 适合做：
 
-- 汇总分析整批帖子
+- 汇总处理整批帖子
 - 根据整批帖子内容决定是否回复
 
 ### `on_cycle_finished`
@@ -532,11 +532,11 @@ class Plugin:
 
 - 插件状态是内存态
 - 进程退出后消失
-- 不开 SQLite
+- 不开数据库
 
 爬取模式：
 
-- 插件状态落 SQLite
+- 插件状态落当前存储后端
 - `kv`、`once`、每日计数都会持久化
 
 ## 超时与失败熔断
@@ -626,7 +626,7 @@ ctx.logger.info("something happened: topic_id=%s", topic_id)
 - `on_post_fetched`
   - 只做单帖规则
 - `on_topic_after_crawl`
-  - 做整批帖子分析和汇总动作
+  - 做整批帖子处理和汇总动作
 
 尽量避免：
 

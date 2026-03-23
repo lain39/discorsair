@@ -12,11 +12,12 @@ from discorsair.utils.jsonc import loads as jsonc_loads
 from discorsair.utils.jsonc import strip_comments as jsonc_strip_comments
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-_ENV_OVERRIDE_PATHS: dict[str, tuple[str, str]] = {
+_ENV_OVERRIDE_PATHS: dict[str, tuple[str, ...]] = {
     "DISCORSAIR_AUTH_NAME": ("auth", "name"),
     "DISCORSAIR_AUTH_COOKIE": ("auth", "cookie"),
     "DISCORSAIR_AUTH_KEY": ("server", "api_key"),
     "DISCORSAIR_NOTIFY_URL": ("notify", "url"),
+    "DISCORSAIR_POSTGRES_DSN": ("storage", "postgres", "dsn"),
 }
 _RUNTIME_STATE_AUTH_PATHS: tuple[tuple[str, str], ...] = (
     ("auth", "cookie"),
@@ -57,14 +58,20 @@ def default_app_config() -> dict[str, Any]:
         },
         "debug": False,
         "logging": {"path": ""},
-        "storage": {"path": "data/discorsair.db", "auto_per_site": True, "rotate_daily": False},
+        "storage": {
+            "backend": "sqlite",
+            "path": "data/discorsair.db",
+            "auto_per_site": True,
+            "lock_dir": "data/locks",
+            "postgres": {"dsn": ""},
+        },
         "crawl": {"enabled": True},
         "watch": {"use_unseen": False, "timings_per_topic": 30},
         "plugins": {"dir": "plugins", "hook_timeout_secs": 10, "max_consecutive_failures": 3, "items": {}},
         "queue": {"maxsize": 0},
         "server": {
             "host": "127.0.0.1",
-            "port": 8080,
+            "port": 17880,
             "action_timeout_secs": 60,
             "interval_secs": 30,
             "max_posts_per_interval": 200,
@@ -145,8 +152,8 @@ def merge_app_config_and_runtime_state(app_data: dict[str, Any], state_data: dic
     return merged
 
 
-def active_env_override_paths() -> set[tuple[str, str]]:
-    active: set[tuple[str, str]] = set()
+def active_env_override_paths() -> set[tuple[str, ...]]:
+    active: set[tuple[str, ...]] = set()
     for env_name, path in _ENV_OVERRIDE_PATHS.items():
         value = os.getenv(env_name)
         if not value:
@@ -155,7 +162,7 @@ def active_env_override_paths() -> set[tuple[str, str]]:
     return active
 
 
-def validate_app_config(config: dict[str, Any]) -> None:
+def validate_app_config(config: dict[str, Any], *, require_auth_cookie: bool = True) -> None:
     _validate_removed_fields(config)
     site = _require_object(config, "site", "config.site")
     auth = _require_object(config, "auth", "config.auth")
@@ -173,7 +180,6 @@ def validate_app_config(config: dict[str, Any]) -> None:
     _validate_bool(config, "debug", "config.debug")
     _validate_bool(auth, "disabled", "config.auth.disabled")
     _validate_bool(storage_cfg, "auto_per_site", "config.storage.auto_per_site")
-    _validate_bool(storage_cfg, "rotate_daily", "config.storage.rotate_daily")
     _validate_bool(crawl_cfg, "enabled", "config.crawl.enabled")
     _validate_bool(watch_cfg, "use_unseen", "config.watch.use_unseen")
     _validate_bool(server_cfg, "auto_restart", "config.server.auto_restart")
@@ -198,6 +204,9 @@ def validate_app_config(config: dict[str, Any]) -> None:
     _validate_non_negative_int(server_cfg, "max_restarts", "config.server.max_restarts")
     _validate_non_negative_int(server_cfg, "same_error_stop_threshold", "config.server.same_error_stop_threshold")
     _validate_string(site, "base_url", "config.site.base_url")
+    _validate_string(storage_cfg, "backend", "config.storage.backend")
+    _validate_string(storage_cfg, "path", "config.storage.path")
+    _validate_string(storage_cfg, "lock_dir", "config.storage.lock_dir")
     _validate_string(server_cfg, "host", "config.server.host")
     _validate_string(server_cfg, "api_key", "config.server.api_key")
     if "schedule" in server_cfg and not isinstance(server_cfg.get("schedule"), list):
@@ -211,7 +220,17 @@ def validate_app_config(config: dict[str, Any]) -> None:
     base_url = site.get("base_url", "")
     if not base_url:
         raise ValueError("config.site.base_url is required")
-    if not auth.get("cookie"):
+    backend = storage_cfg.get("backend", "sqlite")
+    if backend not in {"sqlite", "postgres"}:
+        raise ValueError("config.storage.backend must be 'sqlite' or 'postgres'")
+    pg_cfg = storage_cfg.get("postgres", {})
+    if not isinstance(pg_cfg, dict):
+        raise ValueError("config.storage.postgres must be an object")
+    if backend == "postgres":
+        _validate_string(pg_cfg, "dsn", "config.storage.postgres.dsn")
+        if not pg_cfg.get("dsn"):
+            raise ValueError("config.storage.postgres.dsn is required when backend=postgres")
+    if require_auth_cookie and not auth.get("cookie"):
         raise ValueError("config.auth.cookie is required")
     tz = time_cfg.get("timezone", "UTC")
     try:
@@ -224,6 +243,9 @@ def _validate_removed_fields(config: dict[str, Any]) -> None:
     queue_cfg = config.get("queue", {})
     if isinstance(queue_cfg, dict) and "timeout_secs" in queue_cfg:
         raise ValueError("config.queue.timeout_secs has been removed; delete this field")
+    storage_cfg = config.get("storage", {})
+    if isinstance(storage_cfg, dict) and "rotate_daily" in storage_cfg:
+        raise ValueError("config.storage.rotate_daily has been removed; delete this field")
 
 
 def _apply_env_overrides(config: dict[str, Any]) -> None:

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from discorsair.storage.sqlite_store import SQLiteStore
+from discorsair.storage import StoreBackend
 
 
-def status(store: SQLiteStore | None, plugins: dict[str, Any] | None = None) -> dict[str, object]:
+def status(store: StoreBackend | None, plugins: dict[str, Any] | None = None) -> dict[str, object]:
     plugins_payload = plugins if plugins is not None else {"enabled": False, "count": 0, "backend": None, "runtime_live": False, "items": []}
     if store is None:
         return {

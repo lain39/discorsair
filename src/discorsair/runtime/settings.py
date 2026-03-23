@@ -8,9 +8,13 @@ from typing import Any
 
 @dataclass(frozen=True)
 class StoreSettings:
+    backend: str
     path: str
+    lock_dir: str
     timezone_name: str
-    rotate_daily: bool
+    site_key: str
+    account_name: str
+    base_url: str
 
 
 @dataclass(frozen=True)
@@ -45,7 +49,7 @@ class RuntimeSettings:
     server: ServerSettings
 
 
-def build_runtime_settings(app_config: dict[str, Any], storage_path: str) -> RuntimeSettings:
+def build_runtime_settings(app_config: dict[str, Any], storage_path: str, site_key: str) -> RuntimeSettings:
     timezone_name = app_config.get("time", {}).get("timezone", "Asia/Shanghai")
     storage_cfg = app_config.get("storage", {})
     watch_cfg = app_config.get("watch", {})
@@ -54,9 +58,13 @@ def build_runtime_settings(app_config: dict[str, Any], storage_path: str) -> Run
     return RuntimeSettings(
         timezone_name=timezone_name,
         store=StoreSettings(
+            backend=str(storage_cfg.get("backend", "sqlite") or "sqlite"),
             path=storage_path,
+            lock_dir=str(storage_cfg.get("lock_dir", "data/locks") or "data/locks"),
             timezone_name=timezone_name,
-            rotate_daily=_as_bool(storage_cfg.get("rotate_daily", False), "storage.rotate_daily"),
+            site_key=site_key,
+            account_name=str(app_config.get("auth", {}).get("name", "main") or "main"),
+            base_url=str(app_config.get("site", {}).get("base_url", "") or ""),
         ),
         watch=WatchSettings(
             crawl_enabled=_as_bool(app_config.get("crawl", {}).get("enabled", True), "crawl.enabled"),
@@ -67,7 +75,7 @@ def build_runtime_settings(app_config: dict[str, Any], storage_path: str) -> Run
         ),
         server=ServerSettings(
             host=server_cfg.get("host", "127.0.0.1"),
-            port=int(server_cfg.get("port", 8080)),
+            port=int(server_cfg.get("port", 17880)),
             schedule=list(server_cfg.get("schedule", [])),
             api_key=server_cfg.get("api_key", ""),
             action_timeout_secs=float(server_cfg.get("action_timeout_secs", 60)),

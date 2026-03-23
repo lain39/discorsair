@@ -10,6 +10,8 @@ from .context import RuntimeCommandContext
 from .notify import handle_notify_test as handle_notify_test
 from .serve import handle_serve_command
 from .status import handle_status as handle_status
+from .transfer import handle_export_command as handle_export_command
+from .transfer import handle_import_command as handle_import_command
 from .watch import handle_watch_command
 
 

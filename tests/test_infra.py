@@ -29,7 +29,7 @@ from discorsair.core.request_queue import RequestQueue
 from discorsair.core.requester import ChallengeUnresolvedError, RateLimitedError
 from discorsair.discourse.client import DiscourseAuthError
 from discorsair.discourse.queued_client import QueuedDiscourseClient
-from discorsair.server.http_server import ControlHandler, ControlServer, serve
+from discorsair.server.http_server import ControlHandler, ControlServer, WatchController, serve
 from discorsair.storage.sqlite_store import SQLiteStore
 
 
@@ -343,7 +343,13 @@ class RequestQueueTests(unittest.TestCase):
 class SQLiteStoreTests(unittest.TestCase):
     def test_store_persists_posts_topics_notifications_and_stats(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = SQLiteStore(str(Path(tmpdir) / "discorsair.db"), timezone_name="UTC")
+            store = SQLiteStore(
+                str(Path(tmpdir) / "discorsair.db"),
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+                timezone_name="UTC",
+            )
             try:
                 store.insert_posts(
                     10,
@@ -359,7 +365,25 @@ class SQLiteStoreTests(unittest.TestCase):
                 )
                 self.assertEqual(store.get_existing_post_ids(10, [101, 202]), {101})
 
-                store.upsert_topic(10, last_synced_post_number=8, last_stream_len=3, last_seen_at="2026-03-18T00:00:00Z")
+                store.upsert_topic_detail(
+                    {"id": 10, "title": "hello", "reply_count": 7, "views": 123, "unseen": True, "last_read_post_number": 5},
+                    {
+                        "id": 10,
+                        "title": "hello",
+                        "slug": "hello",
+                        "tags": ["x"],
+                        "category_id": 9,
+                        "reply_count": 7,
+                        "views": 123,
+                        "highest_post_number": 8,
+                        "last_posted_at": "2026-03-18T00:00:00Z",
+                        "post_stream": {
+                            "posts": [{"id": 101, "post_number": 1, "created_at": "2026-03-18T00:00:00Z", "updated_at": "2026-03-18T00:00:00Z"}],
+                            "stream": [101],
+                        },
+                    },
+                )
+                store.upsert_topic_crawl_state(10, last_synced_post_number=8, last_stream_len=3)
                 self.assertEqual(store.get_last_synced_post_number(10), 8)
 
                 store.update_last_read_post_number(10, 5)
@@ -387,17 +411,20 @@ class SQLiteStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_rotate_daily_switches_database_path(self) -> None:
+    def test_store_bootstraps_site_and_account_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = SQLiteStore(str(Path(tmpdir) / "discorsair.db"), timezone_name="UTC", rotate_daily=True)
+            store = SQLiteStore(
+                str(Path(tmpdir) / "discorsair.db"),
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+                timezone_name="UTC",
+            )
             try:
-                first = store.current_path()
-                day_one = store._current_day
-                store._today = lambda: "2099-12-31"  # type: ignore[method-assign]
-                rotated = store.current_path()
-                self.assertNotEqual(first, rotated)
-                self.assertNotEqual(day_one, store._current_day)
-                self.assertTrue(rotated.endswith(".2099-12-31.db"))
+                row = store._conn.execute("SELECT site_key, base_url FROM sites").fetchone()
+                self.assertEqual(row, ("forum.example", "https://forum.example"))
+                row = store._conn.execute("SELECT site_key, account_name FROM accounts").fetchone()
+                self.assertEqual(row, ("forum.example", "main"))
             finally:
                 store.close()
 
@@ -431,6 +458,10 @@ class _DummyWatchController:
     def stop(self) -> bool:
         self.stop_calls += 1
         return True
+
+    def stop_result(self) -> dict[str, bool]:
+        self.stop_calls += 1
+        return {"ok": True, "already_stopped": True}
 
     def handle_auth_invalid(self, exc: Exception, *, source: str) -> None:
         self.auth_invalid_calls.append((source, str(exc)))
@@ -503,6 +534,27 @@ class _DummyClient:
 
 
 class ControlHandlerTests(unittest.TestCase):
+    def _real_watch_controller(self) -> WatchController:
+        return WatchController(
+            client=types.SimpleNamespace(),
+            store=None,
+            notifier=None,
+            interval_secs=1,
+            max_posts_per_interval=None,
+            crawl_enabled=False,
+            use_unseen=False,
+            timings_per_topic=5,
+            schedule_windows=[],
+            notify_interval_secs=60,
+            notify_auto_mark_read=False,
+            plugin_manager=None,
+            auto_restart=True,
+            restart_backoff_secs=1,
+            max_restarts=0,
+            same_error_stop_threshold=0,
+            timezone_name="UTC",
+        )
+
     def _run_handler(
         self,
         method: str,
@@ -646,8 +698,54 @@ class ControlHandlerTests(unittest.TestCase):
             headers={"X-API-Key": "secret"},
         )
         self.assertEqual(status, 200)
-        self.assertEqual(data, {"ok": True})
+        self.assertEqual(data, {"ok": True, "already_stopped": True})
         self.assertEqual(server.watch_controller.stop_calls, 1)
+
+    def test_watch_stop_reports_running_real_controller_as_not_already_stopped(self) -> None:
+        controller = self._real_watch_controller()
+        started = threading.Event()
+
+        def fake_watch(*args, **kwargs) -> None:
+            started.set()
+            while not kwargs["stop_event"].is_set():
+                time.sleep(0.01)
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(started.wait(timeout=1))
+            (status, data), _ = self._run_handler(
+                "POST",
+                "/watch/stop",
+                body={},
+                headers={"X-API-Key": "secret"},
+                watch_controller=controller,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"ok": True, "already_stopped": False})
+        controller._runtime.thread.join(timeout=1)
+
+    def test_watch_stop_reports_finished_real_controller_as_already_stopped(self) -> None:
+        controller = self._real_watch_controller()
+        finished = threading.Event()
+
+        def fake_watch(*args, **kwargs) -> None:
+            finished.set()
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(finished.wait(timeout=1))
+            controller._runtime.thread.join(timeout=1)
+            (status, data), _ = self._run_handler(
+                "POST",
+                "/watch/stop",
+                body={},
+                headers={"X-API-Key": "secret"},
+                watch_controller=controller,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"ok": True, "already_stopped": True})
 
     def test_reply_requires_topic_id_and_raw(self) -> None:
         (status, data), _ = self._run_handler("POST", "/reply", body={}, headers={"X-API-Key": "secret"})

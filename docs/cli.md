@@ -20,7 +20,7 @@ discorsair <command> [options]
 
 输出约定：
 
-- `status` / `daily` / `like` / `reply` / `notify test` 输出 JSON
+- `status` / `daily` / `like` / `reply` / `export` / `import` / `notify test` 输出 JSON
 - `run` / `watch` / `serve` 主要通过日志反映运行状态
 
 ### 1. `run`
@@ -59,7 +59,7 @@ discorsair daily
 
 ### 3. `watch`
 
-持续拉取信息流并输出/落盘，适合分析数据；当前行为与 `run` 相同。
+持续拉取信息流并输出/落盘，适合持续采集；当前行为与 `run` 相同。
 
 ```
 discorsair watch --max-posts-per-interval 200
@@ -97,12 +97,49 @@ discorsair reply --topic 719623 --raw "hello"
 
 - `{"ok": true, "topic_id": 719623, "post_id": 123456, ...}`
 
-### 6. `serve`
+### 6. `export`
+
+按当前配置里的存储后端导出数据到 NDJSON 目录。
+
+```
+discorsair export --output ./export
+```
+
+说明：
+
+- 当前只支持 NDJSON 格式
+- 读取当前 `--config` 对应的 `storage.backend`
+- SQLite 会导出当前库文件；PostgreSQL 会导出当前 DSN 对应库
+
+输出：
+
+- `{"ok": true, "action": "export", "format": "discorsair-ndjson-v1", "backend": "...", "output_dir": "...", "tables": {...}}`
+
+### 7. `import`
+
+把 NDJSON 导出目录导入到当前配置里的存储后端。
+
+```
+discorsair import --input ./export
+```
+
+说明：
+
+- 当前只支持 NDJSON 格式
+- 导入前会先按当前 `storage.backend` 初始化目标 schema
+- 目标是 SQLite 时写入当前库文件；目标是 PostgreSQL 时写入当前 DSN 对应库
+- 同一份导出重复导入时，主键表会收敛到最终状态，去重表和插件动作日志不会无限重复插入
+
+输出：
+
+- `{"ok": true, "action": "import", "format": "discorsair-ndjson-v1", "backend": "...", "input_dir": "...", "tables": {...}}`
+
+### 8. `serve`
 
 启动 HTTP 控制服务。
 
 ```
-discorsair serve --host 0.0.0.0 --port 8080
+discorsair serve --host 0.0.0.0 --port 17880
 ```
 
 说明：
@@ -115,7 +152,7 @@ discorsair serve --host 0.0.0.0 --port 8080
 
 - `POST /watch/start`（请求体可选：`{"use_schedule": true|false}`；返回：`{"ok": true|false}`）
 - `POST /watch/config`（请求体：`{"use_unseen": true|false, "timings_per_topic": 30, "max_posts_per_interval": 200}`）
-- `POST /watch/stop`（返回：`{"ok": true|false}`）
+- `POST /watch/stop`（返回：`{"ok": true|false, "already_stopped": true|false}`）
 - `GET /watch/status`
 - `POST /like`（请求体：`{"post_id": 123, "emoji": "heart"}`）
 - `POST /reply`（请求体：`{"topic_id": 123, "raw": "text", "category": 1}`）
@@ -141,6 +178,7 @@ discorsair serve --host 0.0.0.0 --port 8080
 ```json
 {
   "running": true,
+  "stop_requested": false,
   "stopping": false,
   "started_at": "2026-03-17T01:00:00Z",
   "last_tick": "2026-03-17T01:10:00Z",
@@ -175,9 +213,13 @@ discorsair serve --host 0.0.0.0 --port 8080
 说明：
 
 - `use_schedule` 表示当前运行中的 watch 线程是否真的按 `server.schedule` 控制
-- `stopping == true` 表示已经收到 `POST /watch/stop`，但当前 watch 线程还没完全退出
+- `stop_requested == true` 表示已经收到过停止请求；线程可能仍在收尾，也可能已经停完
+- `stopping == true` 表示已经收到 `POST /watch/stop`，且当前 watch 线程还没完全退出
 - 只有 `use_schedule == true` 时，`next_run` 才有值；手动用 `POST /watch/start {"use_schedule": false}` 启动时，`next_run` 为 `null`
-- `POST /watch/stop` 返回 `{"ok": true}` 只表示停止请求已发出，不等于线程已经完全停止；是否还在收尾看 `stopping`
+- `POST /watch/stop` 是幂等的：线程正在运行时会返回 `{"ok": true, "already_stopped": false}`；线程在处理这次 stop 请求之前就已经停完时，会返回 `{"ok": true, "already_stopped": true}`
+- `POST /watch/stop` 返回 `{"ok": false}` 只表示当前没有可停止的 watch 实例
+- `POST /watch/stop` 返回 `{"ok": true}` 不等于线程已经完全停止；是否还在收尾看 `stopping`
+- `storage_path` 在 SQLite 下是库文件路径；在 PostgreSQL 下是脱敏后的 DSN
 
 - `POST /watch/config` 成功示例：
 
@@ -187,6 +229,15 @@ discorsair serve --host 0.0.0.0 --port 8080
   "use_unseen": true,
   "timings_per_topic": 30,
   "max_posts_per_interval": 200
+}
+```
+
+- `POST /watch/stop` 成功示例：
+
+```json
+{
+  "ok": true,
+  "already_stopped": true
 }
 ```
 
@@ -214,7 +265,7 @@ discorsair serve --host 0.0.0.0 --port 8080
 }
 ```
 
-### 7. `status`
+### 9. `status`
 
 查看统计状态。
 
@@ -229,7 +280,7 @@ discorsair status
 其中 `plugins` 会包含：
 
 - `backend`
-  - 启用插件时为 `sqlite` 或 `memory`
+  - 启用插件时为 `sqlite`、`postgres` 或 `memory`
   - 未启用任何插件时为 `null`
 - `runtime_live`
   - `discorsair status` 下固定为 `false`
@@ -247,7 +298,7 @@ discorsair status
 - 因此其中的运行态字段，例如 `hook_successes` / `hook_failures` / `disabled`，在 CLI `status` 下会是 `null`
 - 如果要看运行中 watch 线程里的实时插件运行态，用 HTTP `GET /watch/status`
 
-### 8. `notify test`
+### 10. `notify test`
 
 发送一条测试通知。
 
@@ -260,7 +311,7 @@ discorsair notify test
 - 已配置通知：`{"ok": true|false, "action": "notify_test"}`
 - 未配置通知：`{"ok": false, "action": "notify_test", "reason": "notify_not_configured"}`
 
-### 9. `init`
+### 11. `init`
 
 写入配置模板。
 

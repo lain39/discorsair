@@ -428,6 +428,7 @@ class WatchAndServerTests(unittest.TestCase):
             status = controller.status()
             self.assertEqual(status["use_schedule"], False)
             self.assertEqual(status["schedule"], ["08:00-12:00"])
+            self.assertEqual(status["stop_requested"], False)
             self.assertEqual(status["stopping"], False)
             self.assertIsNone(status["next_run"])
             controller.stop()
@@ -447,11 +448,28 @@ class WatchAndServerTests(unittest.TestCase):
             self.assertTrue(controller.stop())
             status = controller.status()
             self.assertEqual(status["running"], True)
+            self.assertEqual(status["stop_requested"], True)
             self.assertEqual(status["stopping"], True)
             controller._runtime.thread.join(timeout=1)
             status = controller.status()
             self.assertEqual(status["running"], False)
+            self.assertEqual(status["stop_requested"], True)
             self.assertEqual(status["stopping"], False)
+
+    def test_watch_controller_stop_returns_true_after_thread_already_exited(self) -> None:
+        controller = self._build_watch_controller()
+        finished = threading.Event()
+
+        def fake_watch(*args, **kwargs) -> None:
+            finished.set()
+
+        with patch("discorsair.server.http_server.watch", side_effect=fake_watch):
+            self.assertTrue(controller.start(use_schedule=False))
+            self.assertTrue(finished.wait(timeout=1))
+            controller._runtime.thread.join(timeout=1)
+            self.assertFalse(controller.status()["running"])
+            self.assertEqual(controller.status()["stop_requested"], False)
+            self.assertTrue(controller.stop())
 
     def test_watch_controller_configure_interrupts_restart_backoff(self) -> None:
         controller = self._build_watch_controller(

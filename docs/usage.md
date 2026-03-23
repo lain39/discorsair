@@ -16,7 +16,7 @@
 - `auth.cookie` 需要在 `app.json`、对应的 `*.state.json` 或环境变量里至少提供一处
 - `auth.proxy` 可设置代理（可留空）
 - `auth.name` 账号标识（用于通知前缀）
-- 支持用环境变量覆盖敏感字段：`DISCORSAIR_AUTH_COOKIE -> auth.cookie`、`DISCORSAIR_AUTH_NAME -> auth.name`、`DISCORSAIR_AUTH_KEY -> server.api_key`、`DISCORSAIR_NOTIFY_URL -> notify.url`
+- 支持用环境变量覆盖敏感字段：`DISCORSAIR_AUTH_COOKIE -> auth.cookie`、`DISCORSAIR_AUTH_NAME -> auth.name`、`DISCORSAIR_AUTH_KEY -> server.api_key`、`DISCORSAIR_NOTIFY_URL -> notify.url`、`DISCORSAIR_POSTGRES_DSN -> storage.postgres.dsn`
 - 启动时按 `app.json -> *.state.json -> 环境变量` 的顺序合并 `auth` 状态；因此 `auth.cookie` 可以不写在文件里，改由 `DISCORSAIR_AUTH_COOKIE` 注入
 - `auth.disabled=true` 时会阻止当前账号启动
 - `auth.note` 仍保留在 `app.json`
@@ -31,9 +31,14 @@
 - 对当前 `watch` 流程来说，`get_topic` / `post_timings` 被 `429` 时，当前 topic 会停在这里等待；正常情况下不会在同一条 watch 链里无限积压更多同类请求
 - 遇到 `BAD CSRF` 时会强制重新请求 `/session/csrf` 获取新 token，不会仅复用当前内存里的缓存 token
 - `flaresolverr.ua_probe_url` 可省略，不填时默认使用 `data:,`
-- `storage.path` 指定 SQLite 存储路径（默认 `data/discorsair.db`）
-- `storage.auto_per_site` 按站点自动区分数据库文件
-- `storage.rotate_daily` 按天分库（文件名追加日期）
+- `storage.backend` 选择存储后端：`sqlite` 或 `postgres`
+- `storage.path` 指定 SQLite 存储路径（默认 `data/discorsair.db`）；`backend=postgres` 时忽略
+- `storage.auto_per_site` 仅对 SQLite 生效，用于按站点自动区分数据库文件；`backend=postgres` 时忽略
+- `storage.postgres.dsn` 指定 PostgreSQL 连接串；启用 PostgreSQL 后端时必填
+- `storage.lock_dir` 指定站点级 crawl lock 目录；sqlite/postgres 都会使用
+- 爬取模式下同一 `site` 同一时刻只允许一个进程运行；运行时会在 `storage.lock_dir` 下创建对应的 crawl lock
+- 旧 SQLite schema 不做迁移；如果启动时报 `sqlite schema mismatch`，直接删除旧库后重建
+- 数据导出/导入命令为 `discorsair export` / `discorsair import`
 - `crawl.enabled` 控制是否启用帖子内容抓取（默认 `true`）
 - `debug` 启用详细日志（请求地址、请求头、响应等，敏感字段会脱敏）
 - `logging.path` 日志文件路径（空表示不写文件）
@@ -68,6 +73,48 @@
 - `run/watch` 命令不读取 `server.schedule`，也不会自动回退到 `server.interval_secs` / `server.max_posts_per_interval`
 - `time.timezone` 时区（用于今日统计与运行时段）
 - 模板文件为 JSONC（允许 `//` 注释），程序也支持读取 JSONC
+- 如果要使用 PostgreSQL 后端，先安装可选依赖：`uv sync --extra postgres`
+- PostgreSQL 集成测试可通过 `DISCORSAIR_PG_TEST_DSN=postgresql://... uv run --extra postgres python -m unittest tests.test_postgres_integration` 单独运行；未设置该环境变量时会自动跳过
+- Schema 规划见 `docs/schema.md`
+
+## PostgreSQL 后端
+
+- PostgreSQL 模式是“单库多站点、多账号共存”；SQLite 仍是按站点分文件
+- 使用 PostgreSQL 前先安装依赖：`uv sync --extra postgres`
+- 如果不想把数据库密码写进配置文件，可以改用环境变量 `DISCORSAIR_POSTGRES_DSN`
+- 只需要先手动创建数据库，不需要手动建表；首次启动时运行时会自动初始化当前 schema
+- 如果缺少 `psycopg`，启动时会直接报错并提示先安装 postgres extra
+- `discorsair status` 和 `GET /watch/status` 在 PostgreSQL 下显示的 `storage_path` 是脱敏后的 DSN
+
+示例配置：
+
+```jsonc
+{
+  "storage": {
+    "backend": "postgres",
+    "path": "data/discorsair.db", // postgres 模式下忽略
+    "auto_per_site": true,        // postgres 模式下忽略
+    "lock_dir": "data/locks",
+    "postgres": {
+      "dsn": "postgresql://user:password@127.0.0.1:5432/discorsair"
+    }
+  }
+}
+```
+
+典型启动：
+
+- 1. 创建数据库，例如 `createdb discorsair`
+- 2. 配好 `storage.backend=postgres` 和 `storage.postgres.dsn`
+- 3. 直接运行 `discorsair --config config/app.json run`、`watch` 或 `serve`
+
+数据迁移：
+
+- SQLite -> PostgreSQL：
+  - `discorsair --config config/sqlite.json export --output ./export`
+  - `discorsair --config config/postgres.json import --input ./export`
+- PostgreSQL -> SQLite / PostgreSQL -> PostgreSQL 也使用同一套 `export` / `import`
+- 导入时仍按当前配置对应的 `site/account` scope 校验；scope 不匹配会拒绝导入
 
 ## FlareSolverr
 
@@ -92,5 +139,5 @@
 - 参见 `docs/cli.md`
 - 架构参见 `docs/architecture.md`
 - `run` 和 `watch` 当前共用同一套 watch 循环实现与参数
-- `status` / `daily` / `like` / `reply` / `notify test` 默认输出 JSON
+- `status` / `daily` / `like` / `reply` / `export` / `import` / `notify test` 默认输出 JSON
 - `run` / `watch` / `serve` 主要通过日志反映运行状态

@@ -10,6 +10,8 @@ from curl_cffi.requests.exceptions import RequestException
 from discorsair.discourse.client import DiscourseAuthError
 from .commands import RuntimeCommandContext
 from .commands import handle_authenticated_command
+from .commands import handle_export_command
+from .commands import handle_import_command
 from .commands import handle_notify_test
 from .commands import handle_status
 from .factory import RuntimeServices
@@ -29,18 +31,25 @@ class DiscorsairRuntime:
         self._notifier = build_notifier(app_config)
 
     @classmethod
-    def from_config_path(cls, config_path: str) -> "DiscorsairRuntime":
-        return cls(load_runtime_app_config(config_path))
+    def from_config_path(cls, config_path: str, *, require_auth_cookie: bool = True) -> "DiscorsairRuntime":
+        return cls(load_runtime_app_config(config_path, require_auth_cookie=require_auth_cookie))
 
     def run(self, args: argparse.Namespace) -> CommandOutcome:
         if args.command == "status":
             return handle_status(self._app_config, self._settings)
+        if args.command == "export":
+            return handle_export_command(self._app_config, self._settings, output_dir=args.output)
+        if args.command == "import":
+            return handle_import_command(self._app_config, self._settings, input_dir=args.input)
         if args.command == "notify" and args.notify_cmd == "test":
             return handle_notify_test(self._notifier)
 
         services: RuntimeServices | None = None
         try:
-            services = self._open_services()
+            services = self._open_services(
+                with_crawl_resources=args.command in {"run", "watch", "serve"},
+                with_plugins=args.command in {"run", "watch", "serve"},
+            )
             return handle_authenticated_command(
                 args,
                 RuntimeCommandContext(
@@ -73,5 +82,10 @@ class DiscorsairRuntime:
             if services is not None:
                 services.close()
 
-    def _open_services(self) -> RuntimeServices:
-        return build_services(self._app_config, self._settings)
+    def _open_services(self, *, with_crawl_resources: bool = True, with_plugins: bool = True) -> RuntimeServices:
+        return build_services(
+            self._app_config,
+            self._settings,
+            with_crawl_resources=with_crawl_resources,
+            with_plugins=with_plugins,
+        )

@@ -45,9 +45,9 @@ class RuntimeStateStore:
         self._app_config = app_config
         env_paths = app_config.get("_env_override_paths", [])
         self._env_override_paths = {
-            tuple(path)
+            tuple(str(part) for part in path)
             for path in env_paths
-            if isinstance(path, (list, tuple)) and len(path) == 2
+            if isinstance(path, (list, tuple)) and len(path) >= 2
         }
         self._lock = threading.RLock()
         state_path = app_config.get("_state_path") or derive_runtime_state_path(app_config.get("_path", "app.json"))

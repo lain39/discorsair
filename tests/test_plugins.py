@@ -9,6 +9,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -317,7 +318,13 @@ class PluginTests(unittest.TestCase):
                 "_path": str(config_path),
                 "plugins": {"items": {"recorder": {"enabled": True}}},
             }
-            store = SQLiteStore(str(Path(tmpdir) / "discorsair.db"), timezone_name="UTC")
+            store = SQLiteStore(
+                str(Path(tmpdir) / "discorsair.db"),
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+                timezone_name="UTC",
+            )
             try:
                 manager = PluginManager.from_app_config(app_config, client=client, store=store, timezone_name="UTC")
                 watch(
@@ -962,7 +969,13 @@ class PluginTests(unittest.TestCase):
                 "_path": str(config_path),
                 "plugins": {"items": {"stateful": {"enabled": True}}},
             }
-            store = SQLiteStore(str(Path(tmpdir) / "discorsair.db"), timezone_name="UTC")
+            store = SQLiteStore(
+                str(Path(tmpdir) / "discorsair.db"),
+                site_key="forum.example",
+                account_name="main",
+                base_url="https://forum.example",
+                timezone_name="UTC",
+            )
             try:
                 manager = PluginManager.from_app_config(app_config, client=_PluginClient(), store=store, timezone_name="UTC")
                 manager.dispatch("topics.fetched", manager.new_cycle(), topics=[])
@@ -972,6 +985,22 @@ class PluginTests(unittest.TestCase):
                 self.assertEqual(snapshot["items"][0]["daily_counts"], {"trigger:hello": 1})
                 self.assertEqual(snapshot["items"][0]["once_mark_count"], 1)
                 self.assertEqual(snapshot["items"][0]["kv_keys"], ["answer"])
+                rows = store._conn.execute(
+                    """
+                    SELECT hook_name, action, status, reason
+                    FROM plugin_action_logs
+                    WHERE plugin_id = 'stateful'
+                    ORDER BY id
+                    """
+                ).fetchall()
+                self.assertEqual(
+                    rows,
+                    [
+                        ("topics.fetched", "record_trigger", "applied", ""),
+                        ("topics.fetched", "mark_done", "applied", ""),
+                        ("topics.fetched", "set_kv", "applied", ""),
+                    ],
+                )
             finally:
                 store.close()
 
@@ -1034,6 +1063,49 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(status["plugins"]["runtime_live"], True)
             self.assertEqual(status["plugins"]["items"][0]["plugin_id"], "status_test")
             self.assertEqual(status["plugins"]["items"][0]["hook_successes"], {})
+
+    def test_plugin_snapshot_uses_store_backend_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = self._write_plugin_tree(
+                tmpdir,
+                "status_test",
+                """
+                {
+                  "id": "status_test",
+                  "name": "Status Test",
+                  "version": "0.1.0",
+                  "api_version": 1,
+                  "entry": "plugin.py",
+                  "hooks": ["topics.fetched"],
+                  "permissions": ["storage.read"],
+                  "default_priority": 10,
+                  "default_config": {}
+                }
+                """,
+                """
+                class Plugin:
+                    def on_topics_fetched(self, ctx, event):
+                        return None
+
+
+                def create_plugin():
+                    return Plugin()
+                """,
+            )
+            app_config = {
+                "_path": str(config_path),
+                "plugins": {"items": {"status_test": {"enabled": True}}},
+            }
+            store = Mock()
+            store.backend_name.return_value = "postgres"
+            store.get_plugin_daily_counts.return_value = {}
+            store.count_plugin_once_marks.return_value = 0
+            store.list_plugin_kv_keys.return_value = []
+
+            manager = PluginManager.from_app_config(app_config, client=_PluginClient(), store=store, timezone_name="UTC")
+
+            self.assertIsNotNone(manager)
+            self.assertEqual(manager.snapshot()["backend"], "postgres")
 
     def test_plugin_manifest_validates_api_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

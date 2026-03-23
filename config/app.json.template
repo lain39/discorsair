@@ -29,11 +29,21 @@
     "path": ""
   },
 
-  // SQLite 存储
+  // 存储后端
   "storage": {
+    "backend": "sqlite",
+    // 仅 sqlite 使用；backend=postgres 时会忽略这个字段
     "path": "data/discorsair.db",
+    // 仅 sqlite 使用；backend=postgres 时会忽略这个字段
     "auto_per_site": true,
-    "rotate_daily": false
+    // 爬取模式下的站点级锁目录；sqlite/postgres 都会用到
+    "lock_dir": "data/locks",
+    "postgres": {
+      // 仅 postgres 使用；启用前先执行 uv sync --extra postgres
+      // 只需要先手动建库，不需要手动建表；首次启动时会自动初始化 schema
+      // 也可改用环境变量 DISCORSAIR_POSTGRES_DSN 注入，避免把密码写进文件
+      "dsn": "postgresql://user:password@127.0.0.1:5432/discorsair"
+    }
   },
 
   // 是否抓取帖子内容
@@ -91,7 +101,7 @@
   "server": {
     // 监听非本机地址时，务必配置 api_key
     "host": "127.0.0.1",
-    "port": 8080,
+    "port": 17880,
     // HTTP 控制接口（如 /like /reply）的等待超时，超时返回 504；不影响 watch；0 表示不设超时
     "action_timeout_secs": 60,
     "interval_secs": 30,

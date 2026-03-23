@@ -1,7 +1,7 @@
 [project]
 name = "discorsair"
 version = "0.1.0"
-description = "Discourse automation and stream analysis CLI"
+description = "Discourse automation and data collection CLI"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
@@ -13,6 +13,11 @@ classifiers = [
 
 dependencies = [
   "curl_cffi>=0.6.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+  "psycopg[binary]>=3.2",
 ]
 
 [dependency-groups]
