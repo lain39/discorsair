@@ -35,7 +35,7 @@ CLI 命令名：`discorsair`
 - 队列：`queue.maxsize`
 - 通知：`notify.enabled` + `notify.url` + `notify.chat_id`
 - 通知自动已读：`notify.auto_mark_read`（默认关闭；当当前未读通知都已在本地去重状态中时，调用 mark-read 全部标记为已读）
-- 插件：`plugins.dir` + `plugins.items`（示例插件见 `plugins/sample_forum_ops/`）
+- 插件：`plugins.dir` + `plugins.items`（示例插件见 `plugins/sample_forum_ops/`；其中回复/点赞代码默认注释）
 - 通知前缀：`notify.prefix` / `notify.error_prefix`
 - 服务：`discorsair serve` 启动 HTTP 控制服务
 - 控制接口超时：`server.action_timeout_secs`（`0` 表示不设超时）
@@ -46,6 +46,17 @@ CLI 命令名：`discorsair`
 - 运行时只会写回 `*.state.json` 里的 `auth` 状态，不再修改 `app.json`
 - `*.state.json` 首次运行时会自动生成；如果要手工修复运行时状态，直接修改对应的 `*.state.json`，或者删除它后让运行时重新生成
 - `serve` 模式下如果遇到登录失效或 unresolved challenge，会停止 watch、关闭 HTTP 服务，并以非 0 退出
+
+## 开发
+
+- 安装开发依赖：`uv sync --group dev`
+- 本地检查总入口：`make check`
+- 单独跑静态检查：`make lint`、`make static`
+- 单独跑测试：`make test`
+- 构建与包元数据校验：`make build`
+- 发布前约束校验：`make release-check TAG=v0.1.0`
+- CI 会执行：release guard、`ruff check`、`compileall`、单元测试、构建、`twine check`
+- `plugins/` 默认忽略本地自用插件，只保留 `plugins/sample_forum_ops/` 示例插件；如果你要提交自用插件，需要手动 `git add -f`
 
 ## 结构
 
@@ -58,4 +69,3 @@ CLI 命令名：`discorsair`
 ## 备注
 
 - Cookie 建议新建一个隐私窗口来获取，获取后关闭窗口，以免会话冲突导致 cookie 失效。首次导入时建议只保留 `_t`。
-- cooked为""时不要点赞

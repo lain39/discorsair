@@ -164,6 +164,28 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertEqual(app_config["auth"]["status"], "invalid")
         self.assertTrue(app_config["auth"]["disabled"])
 
+    def test_load_runtime_app_config_treats_empty_state_file_as_empty_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "app.json"
+            state_path = derive_runtime_state_path(config_path)
+            config_path.write_text(
+                """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token"}
+}
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path.write_text("", encoding="utf-8")
+            with patch("discorsair.runtime.factory.setup_logging"):
+                app_config = load_runtime_app_config(str(config_path))
+
+        self.assertEqual(app_config["auth"]["cookie"], "_t=file-token")
+        self.assertEqual(app_config["auth"]["status"], "active")
+        self.assertFalse(app_config["auth"]["disabled"])
+
     def test_build_notifier_uses_env_overridden_account_name(self) -> None:
         config_text = """
 {

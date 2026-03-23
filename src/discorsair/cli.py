@@ -6,7 +6,6 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Any
 
 from discorsair.runtime.runner import DiscorsairRuntime
 from discorsair.runtime.types import CommandOutcome

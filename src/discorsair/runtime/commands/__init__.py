@@ -7,9 +7,9 @@ import argparse
 from ..types import CommandOutcome
 from .actions import handle_action_command
 from .context import RuntimeCommandContext
-from .notify import handle_notify_test
+from .notify import handle_notify_test as handle_notify_test
 from .serve import handle_serve_command
-from .status import handle_status
+from .status import handle_status as handle_status
 from .watch import handle_watch_command
 
 

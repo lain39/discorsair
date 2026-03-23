@@ -1,0 +1,73 @@
+name: Release Guard
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional tag to validate, e.g. v0.1.0"
+        required: false
+        default: ""
+
+jobs:
+  release-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync --group dev
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          TAG="${INPUT_TAG:-}"
+          if [ -z "$TAG" ] && [ "${GITHUB_REF:-}" != "${GITHUB_REF#refs/tags/}" ]; then
+            TAG="${GITHUB_REF:-}"
+          fi
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Release guard
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          if [ -n "$TAG" ]; then
+            uv run python scripts/release_guard.py --tag "$TAG"
+          else
+            uv run python scripts/release_guard.py
+          fi
+
+      - name: Ruff
+        run: uv run --group dev ruff check src tests scripts
+
+      - name: Static compile check
+        run: uv run python -m compileall src tests scripts
+
+      - name: Unit tests
+        run: uv run python -m unittest discover -s tests
+
+      - name: Build package
+        run: uv run --group dev python -m build --no-isolation
+
+      - name: Check package metadata
+        run: uv run --group dev python -m twine check dist/*
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: dist/*

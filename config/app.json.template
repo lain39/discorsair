@@ -54,6 +54,7 @@
     "max_consecutive_failures": 3,
     "items": {
       // 示例见 plugins/sample_forum_ops/
+      // 默认只演示主题排序/跳过；回复和点赞代码在示例插件里默认注释，需要手动取消注释后才会执行
       "sample_forum_ops": {
         "enabled": false,
         "priority": 100,

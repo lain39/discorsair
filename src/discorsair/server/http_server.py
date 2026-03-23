@@ -10,7 +10,6 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from concurrent.futures import TimeoutError
@@ -288,7 +287,7 @@ class WatchController:
             )
             return None
 
-        if stop_event.wait(max(self._restart_backoff_secs, 1)):
+        if stop_event.wait(max(float(self._restart_backoff_secs), 0.0)):
             return None
         return next_restarts
 

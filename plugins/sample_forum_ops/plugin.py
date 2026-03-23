@@ -46,12 +46,16 @@ class Plugin:
     def on_post_fetched(self, ctx, event) -> None:
         post = event.post
         cooked = _text(post.get("cooked"))
+        # Notice: When cooked == "", the API may still accept the like, but normal 
+        # browsing cannot like this kind of post, so plugins should keep skipping it!
         if not cooked:
             return
         min_like_count = int(ctx.config.get("min_like_count", 10) or 0)
         if int(post.get("like_count", 0) or 0) < min_like_count:
             return
-        ctx.like(post)
+        # Safety default: keep like automation disabled in the sample plugin.
+        # Uncomment the next line after reviewing the matching rules and limits.
+        # ctx.like(post)
 
     def _reply_if_matched(self, ctx, topic_summary, posts: list[dict]) -> None:
         topic_id = int(topic_summary.get("id", 0) or 0)
@@ -70,7 +74,9 @@ class Plugin:
             if not _contains_any(post_text, post_keywords):
                 return
         once_key = f"reply:{topic_id}:{_text(ctx.config.get('reply_mode', 'after_crawl'))}"
-        ctx.reply(topic_id, reply_text, once_key=once_key)
+        # Safety default: keep reply automation disabled in the sample plugin.
+        # Uncomment the next line after reviewing the trigger conditions and text.
+        # ctx.reply(topic_id, reply_text, once_key=once_key)
 
 
 def create_plugin():

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync --group dev
+
+      - name: Release guard
+        run: uv run python scripts/release_guard.py
+
+      - name: Ruff
+        run: uv run --group dev ruff check src tests scripts
+
+      - name: Static compile check
+        run: uv run python -m compileall src tests scripts
+
+      - name: Unit tests
+        run: uv run python -m unittest discover -s tests
+
+      - name: Build package
+        run: uv run --group dev python -m build --no-isolation
+
+      - name: Check package metadata
+        run: uv run --group dev python -m twine check dist/*

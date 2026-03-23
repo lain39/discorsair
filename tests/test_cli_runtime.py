@@ -470,6 +470,32 @@ class CliRuntimeTests(unittest.TestCase):
             self.assertEqual(saved["auth"]["cookie"], "_t=file-cookie")
             self.assertTrue(saved["auth"]["last_ok"].endswith("Z"))
 
+    def test_state_store_treats_empty_runtime_state_file_as_empty_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "app.json"
+            state_path = self._state_path(config_path)
+            config = {
+                "_path": str(config_path),
+                "site": {"base_url": "https://forum.example", "timeout_secs": 20},
+                "auth": {
+                    "cookie": "_t=file-cookie",
+                    "status": "active",
+                    "disabled": False,
+                    "last_ok": "",
+                    "last_fail": "",
+                    "last_error": "",
+                },
+            }
+            state = RuntimeStateStore(config)
+            state_path.write_text("", encoding="utf-8")
+
+            with self.assertNoLogs("discorsair.runtime.state", level="WARNING"):
+                state.mark_account_ok()
+
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["auth"]["cookie"], "_t=file-cookie")
+            self.assertTrue(saved["auth"]["last_ok"].endswith("Z"))
+
     def test_state_store_preserves_existing_config_file_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "app.json"
@@ -509,7 +535,6 @@ class CliRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "app.json"
             state_path = self._state_path(config_path)
-            raw_config = {"site": {"base_url": "https://forum.example"}, "auth": {"cookie": "_t=file-cookie"}}
             config_one = {
                 "_path": str(config_path),
                 "site": {"base_url": "https://forum.example"},

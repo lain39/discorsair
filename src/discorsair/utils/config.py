@@ -9,6 +9,7 @@ from typing import Any
 
 from discorsair.plugins.validation import validate_plugins_app_config
 from discorsair.utils.jsonc import loads as jsonc_loads
+from discorsair.utils.jsonc import strip_comments as jsonc_strip_comments
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _ENV_OVERRIDE_PATHS: dict[str, tuple[str, str]] = {
@@ -120,7 +121,10 @@ def load_raw_runtime_state(path: str | Path) -> dict[str, Any]:
     state_path = Path(path)
     if not state_path.exists():
         return {}
-    data = jsonc_loads(state_path.read_text(encoding="utf-8"))
+    raw_text = state_path.read_text(encoding="utf-8")
+    if not jsonc_strip_comments(raw_text).strip():
+        return {}
+    data = jsonc_loads(raw_text)
     if not isinstance(data, dict):
         raise ValueError("runtime state root must be an object")
     return data

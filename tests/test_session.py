@@ -162,17 +162,12 @@ class WatchAndServerTests(unittest.TestCase):
         patch_sleep: bool = False,
     ) -> None:
         watch_patch = patch("discorsair.server.http_server.watch", side_effect=side_effect)
-        sleep_patch = patch("discorsair.server.http_server.time.sleep") if patch_sleep else None
+        if patch_sleep:
+            controller._restart_backoff_secs = 0
         with watch_patch:
-            if sleep_patch is not None:
-                with sleep_patch:
-                    started = controller.start(use_schedule=False)
-                    self.assertTrue(started)
-                    controller._runtime.thread.join(timeout=2)
-            else:
-                started = controller.start(use_schedule=False)
-                self.assertTrue(started)
-                controller._runtime.thread.join(timeout=2)
+            started = controller.start(use_schedule=False)
+            self.assertTrue(started)
+            controller._runtime.thread.join(timeout=2)
 
     def _assert_watch_stopped(self, controller: WatchController, expected_error: str) -> None:
         self.assertEqual(controller.status()["last_error"], expected_error)
