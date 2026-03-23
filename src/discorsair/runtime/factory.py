@@ -13,7 +13,14 @@ from discorsair.discourse.client import DiscourseClient
 from discorsair.discourse.queued_client import QueuedDiscourseClient
 from discorsair.plugins import PluginManager
 from discorsair.storage.sqlite_store import SQLiteStore
-from discorsair.utils.config import load_app_config, validate_app_config
+from discorsair.utils.config import (
+    active_env_override_paths,
+    derive_runtime_state_path,
+    load_raw_app_config,
+    load_raw_runtime_state,
+    merge_app_config_and_runtime_state,
+    validate_app_config,
+)
 from discorsair.utils.logging import setup_logging
 from discorsair.utils.notify import Notifier
 from .settings import RuntimeSettings
@@ -37,8 +44,18 @@ class RuntimeServices:
 
 
 def load_runtime_app_config(config_path: str) -> dict[str, Any]:
-    app_config = load_app_config(config_path)
+    app_data = load_raw_app_config(config_path)
+    state_path = derive_runtime_state_path(config_path)
+    try:
+        state_config = load_raw_runtime_state(state_path)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("failed to load runtime state %s: %s", state_path, exc)
+        state_config = {}
+    app_config = merge_app_config_and_runtime_state(app_data, state_config)
+    app_config["_config_path"] = config_path
+    app_config["_state_path"] = str(state_path)
     app_config["_path"] = config_path
+    app_config["_env_override_paths"] = sorted(active_env_override_paths())
     validate_app_config(app_config)
     log_path = app_config.get("logging", {}).get("path")
     debug_enabled = bool(app_config.get("debug", False))

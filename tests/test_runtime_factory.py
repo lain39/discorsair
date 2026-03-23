@@ -21,6 +21,7 @@ sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions
 
 from discorsair.runtime.factory import build_client, build_notifier, build_services, load_runtime_app_config, load_settings, resolve_storage_path
 from discorsair.runtime.settings import RuntimeSettings, ServerSettings, StoreSettings, WatchSettings
+from discorsair.utils.config import derive_runtime_state_path
 
 
 class RuntimeFactoryTests(unittest.TestCase):
@@ -92,6 +93,20 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertEqual(notifier._prefix, "[Discorsair][main]")
         self.assertEqual(notifier._error_prefix, "[Discorsair][error][main]")
 
+    def test_build_client_ignores_auth_status_when_account_not_disabled(self) -> None:
+        app_config = {
+            "site": {"base_url": "https://forum.example"},
+            "auth": {
+                "cookie": "_t=file-token",
+                "status": "invalid",
+                "disabled": False,
+            },
+        }
+
+        client = build_client(app_config)
+
+        self.assertEqual(client._requester._session.base_url, "https://forum.example")
+
     def test_load_runtime_app_config_supports_auth_env_overrides(self) -> None:
         config_text = """
 {
@@ -115,6 +130,39 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertEqual(app_config["server"]["api_key"], "env-key")
         self.assertEqual(app_config["notify"]["url"], "https://env-notify.example")
         self.assertEqual(app_config["_path"], str(config_path))
+        self.assertEqual(app_config["_state_path"], str(derive_runtime_state_path(config_path)))
+        self.assertIn(("auth", "cookie"), app_config["_env_override_paths"])
+        self.assertIn(("server", "api_key"), app_config["_env_override_paths"])
+
+    def test_load_runtime_app_config_prefers_state_file_over_app_cookie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "app.json"
+            state_path = derive_runtime_state_path(config_path)
+            config_path.write_text(
+                """
+{
+  "site": {"base_url": "https://forum.example"},
+  "auth": {"cookie": "_t=file-token", "status": "active", "disabled": false}
+}
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                """
+{
+  "auth": {"cookie": "_t=state-token", "status": "invalid", "disabled": true}
+}
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch("discorsair.runtime.factory.setup_logging"):
+                app_config = load_runtime_app_config(str(config_path))
+
+        self.assertEqual(app_config["auth"]["cookie"], "_t=state-token")
+        self.assertEqual(app_config["auth"]["status"], "invalid")
+        self.assertTrue(app_config["auth"]["disabled"])
 
     def test_build_notifier_uses_env_overridden_account_name(self) -> None:
         config_text = """

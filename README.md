@@ -18,9 +18,11 @@ CLI 命令名：`discorsair`
 ## 配置
 
 - 主配置：`config/app.json`
+- 运行时状态：与配置文件同目录同名的 `*.state.json`，例如 `config/app.json -> config/app.state.json`
 - 账号配置：`config/app.json` 内的 `auth`
 - 模板参考：`config/app.json.template`
-- 必填：`site.base_url`、`auth.cookie`
+- 必填：`site.base_url`
+- `auth.cookie` 需要在 `app.json`、对应的 `*.state.json` 或环境变量里至少提供一处
 - 敏感字段支持环境变量覆盖：`DISCORSAIR_AUTH_COOKIE`、`DISCORSAIR_AUTH_NAME`、`DISCORSAIR_AUTH_KEY`、`DISCORSAIR_NOTIFY_URL`
 - 存储：`storage.path`（SQLite，默认 `data/discorsair.db`）
 - 存储隔离：`storage.auto_per_site`
@@ -40,7 +42,9 @@ CLI 命令名：`discorsair`
 - 服务默认仅监听 `127.0.0.1`
 - 如果 `server.host` 或 `--host` 使用非回环地址，必须配置 `server.api_key`
 - `server.schedule` / `server.interval_secs` / `server.max_posts_per_interval` 仅作用于 `serve` 模式下的 watch 线程；`run/watch` 仍以 CLI 参数为准
-- 运行时只会在成功请求后写回 `auth.cookie` 中的 `_t`，不会持久化其他 cookie，也不会用空 cookie 覆盖配置
+- 启动时按 `app.json -> *.state.json -> 环境变量` 的顺序合并 `auth` 状态
+- 运行时只会写回 `*.state.json` 里的 `auth` 状态，不再修改 `app.json`
+- `*.state.json` 首次运行时会自动生成；如果要手工修复运行时状态，直接修改对应的 `*.state.json`，或者删除它后让运行时重新生成
 - `serve` 模式下如果遇到登录失效或 unresolved challenge，会停止 watch、关闭 HTTP 服务，并以非 0 退出
 
 ## 结构

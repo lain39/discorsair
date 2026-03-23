@@ -6,18 +6,22 @@
 
 ## 配置
 
-- `config/app.json` 写入站点与请求相关配置
-- `config/app.json` 写入站点与账号配置
+- `config/app.json` 写入站点、请求与静态账号配置
+- 运行时状态写入与配置文件同目录同名的 `*.state.json`，例如 `config/app.json -> config/app.state.json`
 - `config/app.json.template` 作为模板参考
+- `*.state.json` 首次运行时自动生成
 - `site.base_url` 站点根地址（必填）
 - `site.timeout_secs` 单次请求超时（秒）
-- `auth.cookie` 登录 cookie（必填），配置中建议只保存 `_t=...`
+- `auth.cookie` 登录 cookie；配置中建议只保存 `_t=...`
+- `auth.cookie` 需要在 `app.json`、对应的 `*.state.json` 或环境变量里至少提供一处
 - `auth.proxy` 可设置代理（可留空）
 - `auth.name` 账号标识（用于通知前缀）
 - 支持用环境变量覆盖敏感字段：`DISCORSAIR_AUTH_COOKIE -> auth.cookie`、`DISCORSAIR_AUTH_NAME -> auth.name`、`DISCORSAIR_AUTH_KEY -> server.api_key`、`DISCORSAIR_NOTIFY_URL -> notify.url`
-- 环境变量覆盖发生在读取配置文件之后、校验之前；因此 `auth.cookie` 可以不写在文件里，改由 `DISCORSAIR_AUTH_COOKIE` 注入
+- 启动时按 `app.json -> *.state.json -> 环境变量` 的顺序合并 `auth` 状态；因此 `auth.cookie` 可以不写在文件里，改由 `DISCORSAIR_AUTH_COOKIE` 注入
 - `auth.disabled=true` 时会阻止当前账号启动
-- `auth.status` / `auth.disabled` / `auth.last_ok` / `auth.last_fail` / `auth.last_error` / `auth.note` 主要用于运行时状态记录
+- `auth.note` 仍保留在 `app.json`
+- `auth.status` / `auth.disabled` / `auth.last_ok` / `auth.last_fail` / `auth.last_error` 主要记录在对应的 `*.state.json`
+- 如果你想手工修复账号状态或覆盖运行时记录，直接修改对应的 `*.state.json`，或者删除它后让运行时重新生成
 - `request.user_agent` 为空时，优先使用 `impersonate_target` 对应的内置 UA；若没有映射且启用了 FlareSolverr，则会通过 `ua_probe_url`（默认 `data:,`）获取
 - `request.impersonate_target` 指定 `curl_cffi` impersonate 目标；缺省或显式留空都会按空值处理，运行时再依赖内置 UA 映射、UA 探测或后续推断来决定
 - UA 探测只用于获取 `userAgent`，不会携带当前站点 cookie，也不会把 probe 返回的 cookie 写回账号状态
@@ -60,7 +64,7 @@
 - `server.api_key` HTTP 服务鉴权（为空则不启用）
 - 当 `server.host` 或 `discorsair serve --host` 使用非回环地址时，必须配置 `server.api_key`
 - `serve` 模式下，如果 watch 线程或 HTTP 控制接口命中登录失效 / unresolved challenge，会停止 watch、关闭 HTTP 服务，并以非 0 退出
-- 其中登录失效会把账号标记为 `invalid` 并禁用；其他 fatal 错误会写入 `auth.last_fail` / `auth.last_error`
+- 其中登录失效会把账号标记为 `invalid` 并禁用；其他 fatal 错误会写入对应 `*.state.json` 里的 `auth.last_fail` / `auth.last_error`
 - `run/watch` 命令不读取 `server.schedule`，也不会自动回退到 `server.interval_secs` / `server.max_posts_per_interval`
 - `time.timezone` 时区（用于今日统计与运行时段）
 - 模板文件为 JSONC（允许 `//` 注释），程序也支持读取 JSONC
@@ -81,7 +85,7 @@
 - 过盾时也会使用 FlareSolverr 访问 `base_url`；如果返回 HTML 含 `<meta name="csrf-token" ...>`，运行时会提取该 token，并用于本次重试及后续请求的 CSRF 同步
 - `cf_clearance` 可按代理 IP 做本地缓存，下次同 IP 先尝试复用
 - 如果过盾后重试仍然命中 `challenge still present after solve`，运行时会清理当前站点 cookie，只保留 `_t`，并丢弃当前代理的 `cf_clearance` 缓存，再按现有重试策略继续
-- 运行时仅在成功请求后才会把最新 `_t` 写回 `auth.cookie`；其他 cookie 不会持久化到配置，空 `_t` 或未变化的值也不会覆盖配置
+- 运行时仅在成功请求后才会把最新 `_t` 写回对应 `*.state.json` 里的 `auth.cookie`；其他 cookie 不会持久化，空 `_t` 或未变化的值也不会覆盖状态文件
 
 ## CLI
 

@@ -17,6 +17,14 @@ _ENV_OVERRIDE_PATHS: dict[str, tuple[str, str]] = {
     "DISCORSAIR_AUTH_KEY": ("server", "api_key"),
     "DISCORSAIR_NOTIFY_URL": ("notify", "url"),
 }
+_RUNTIME_STATE_AUTH_PATHS: tuple[tuple[str, str], ...] = (
+    ("auth", "cookie"),
+    ("auth", "status"),
+    ("auth", "disabled"),
+    ("auth", "last_ok"),
+    ("auth", "last_fail"),
+    ("auth", "last_error"),
+)
 
 _SCHEDULE_WINDOW_RE = re.compile(r"^(?P<start_h>\d{2}):(?P<start_m>\d{2})-(?P<end_h>\d{2}):(?P<end_m>\d{2})$")
 
@@ -90,10 +98,57 @@ def default_app_config() -> dict[str, Any]:
 
 
 def load_app_config(path: str | Path) -> dict[str, Any]:
+    data = load_raw_app_config(path)
+    return merge_app_config_and_runtime_state(data, {})
+
+
+def load_raw_app_config(path: str | Path) -> dict[str, Any]:
     data = jsonc_loads(Path(path).read_text(encoding="utf-8"))
-    merged = _merge_dicts(default_app_config(), data)
+    if not isinstance(data, dict):
+        raise ValueError("config root must be an object")
+    return data
+
+
+def derive_runtime_state_path(config_path: str | Path) -> Path:
+    path = Path(config_path)
+    if path.suffix == ".json":
+        return path.with_name(f"{path.stem}.state.json")
+    return path.with_name(f"{path.name}.state.json")
+
+
+def load_raw_runtime_state(path: str | Path) -> dict[str, Any]:
+    state_path = Path(path)
+    if not state_path.exists():
+        return {}
+    data = jsonc_loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("runtime state root must be an object")
+    return data
+
+
+def apply_runtime_state(config: dict[str, Any], state: dict[str, Any]) -> None:
+    for path in _RUNTIME_STATE_AUTH_PATHS:
+        exists, value = _get_nested_value(state, path)
+        if not exists:
+            continue
+        _set_nested_value(config, path, value)
+
+
+def merge_app_config_and_runtime_state(app_data: dict[str, Any], state_data: dict[str, Any]) -> dict[str, Any]:
+    merged = _merge_dicts(default_app_config(), app_data)
+    apply_runtime_state(merged, state_data)
     _apply_env_overrides(merged)
     return merged
+
+
+def active_env_override_paths() -> set[tuple[str, str]]:
+    active: set[tuple[str, str]] = set()
+    for env_name, path in _ENV_OVERRIDE_PATHS.items():
+        value = os.getenv(env_name)
+        if not value:
+            continue
+        active.add(path)
+    return active
 
 
 def validate_app_config(config: dict[str, Any]) -> None:
@@ -173,6 +228,15 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
         if not value:
             continue
         _set_nested_value(config, path, value)
+
+
+def _get_nested_value(config: dict[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
+    current: Any = config
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return False, None
+        current = current[key]
+    return True, current
 
 
 def _require_object(container: dict[str, Any], key: str, path: str) -> dict[str, Any]:

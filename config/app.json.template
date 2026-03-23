@@ -13,17 +13,12 @@
   "auth": {
     // 可由环境变量 DISCORSAIR_AUTH_NAME 覆盖
     "name": "main",
-    // 配置中建议只保留 _t；运行时也只会把最新 _t 写回配置
+    // 配置中建议只保留初始 _t；运行时刷新后的账号状态会写入同目录同名的 *.state.json
+    // 如果要手工修复运行时状态，修改或删除对应的 *.state.json
     // 可由环境变量 DISCORSAIR_AUTH_COOKIE 覆盖
     "cookie": "_t=...",
     // 认证代理请使用 URL 编码后的形式，例如 http://user:pa%26ss@127.0.0.1:7890
     "proxy": "http://127.0.0.1:7890",
-    // 以下字段主要由运行时维护
-    "status": "active",
-    "disabled": false,
-    "last_ok": "",
-    "last_fail": "",
-    "last_error": "",
     "note": ""
   },
 
