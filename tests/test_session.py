@@ -204,9 +204,12 @@ class WatchAndServerTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self._assert_watch_stopped(controller, "not_logged_in")
         self.assertIsInstance(controller.fatal_error(), DiscourseAuthError)
+        self.assertEqual(controller.status()["start_blocked_reason"], "auth_invalid")
+        self.assertEqual(controller.status()["last_stop_reason"], "auth_invalid")
+        self.assertEqual(controller.status()["recovery_required"], True)
         on_stop.assert_called_once_with()
         on_auth_invalid.assert_called_once()
-        on_fatal.assert_called_once_with()
+        on_fatal.assert_not_called()
         self.assertEqual(notifier.send_error.call_count, 2)
         self.assertEqual(notifier.send_error.call_args_list[0].args, ("watch stopped: auth error: not_logged_in",))
         self.assertEqual(
@@ -216,11 +219,13 @@ class WatchAndServerTests(unittest.TestCase):
 
     def test_watch_controller_does_not_restart_on_unresolved_challenge(self) -> None:
         on_stop = Mock()
+        on_unresolved_challenge = Mock()
         on_fatal = Mock()
         notifier = Mock()
         controller = self._build_watch_controller(
             notifier=notifier,
             on_stop=on_stop,
+            on_unresolved_challenge=on_unresolved_challenge,
             on_fatal=on_fatal,
         )
 
@@ -235,8 +240,12 @@ class WatchAndServerTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self._assert_watch_stopped(controller, "challenge still present after solve")
         self.assertIsInstance(controller.fatal_error(), ChallengeUnresolvedError)
+        self.assertEqual(controller.status()["start_blocked_reason"], "unresolved_challenge")
+        self.assertEqual(controller.status()["last_stop_reason"], "unresolved_challenge")
+        self.assertEqual(controller.status()["recovery_required"], True)
         on_stop.assert_called_once_with()
-        on_fatal.assert_called_once_with()
+        on_unresolved_challenge.assert_called_once()
+        on_fatal.assert_not_called()
         self.assertEqual(notifier.send_error.call_count, 2)
         self.assertEqual(
             notifier.send_error.call_args_list[1].args,
@@ -245,6 +254,25 @@ class WatchAndServerTests(unittest.TestCase):
                 "source=watch stopped detail=challenge still present after solve",
             ),
         )
+
+    def test_watch_controller_force_start_requires_disabled_clear_success(self) -> None:
+        on_force_start = Mock(return_value=False)
+        controller = self._build_watch_controller(on_force_start=on_force_start)
+        controller._start_blocked_reason = "auth_invalid"
+
+        result = controller.start_result(use_schedule=False, force=True)
+
+        self.assertEqual(
+            result,
+            {
+                "ok": False,
+                "reason": "force_start_failed",
+                "detail": "failed to clear disabled flag before force start",
+            },
+        )
+        on_force_start.assert_called_once_with("auth_invalid")
+        self.assertEqual(controller.status()["start_blocked_reason"], "auth_invalid")
+        self.assertFalse(controller.status()["running"])
 
     def test_watch_controller_runs_on_stop_when_same_error_threshold_hits(self) -> None:
         on_stop = Mock()

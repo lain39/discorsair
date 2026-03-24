@@ -43,6 +43,7 @@ CLI 命令名：`discorsair`
 - 通知前缀：`notify.prefix` / `notify.error_prefix`
 - 服务：`discorsair serve` 启动 HTTP 控制服务
 - 控制接口超时：`server.action_timeout_secs`（`0` 表示不设超时）
+- HTTP 控制接口返回 `504` 只表示调用方等待超时，不保证动作未生效；底层请求可能仍已发出或完成
 - 服务默认仅监听 `127.0.0.1`
 - 如果 `server.host` 或 `--host` 使用非回环地址，必须配置 `server.api_key`
 - `server.schedule` / `server.interval_secs` / `server.max_posts_per_interval` 仅作用于 `serve` 模式下的 watch 线程；`run/watch` 仍以 CLI 参数为准
@@ -51,7 +52,10 @@ CLI 命令名：`discorsair`
 - `*.state.json` 不会在启动时预先生成；首次发生受管 `auth` 状态写入时才会自动生成
 - 运行时写回的 `_t` 必须已经被一次成功交互实际带到服务器；如果响应里刚拿到更新的 `_t`，会先留在内存，等后续成功交互验证后再写回
 - 如果要手工修复运行时状态，直接修改对应的 `*.state.json`，或者删除它后等待后续运行时状态重新写入
-- `serve` 模式下如果遇到登录失效或 unresolved challenge，会停止 watch、关闭 HTTP 服务，并以非 0 退出
+- `serve` 模式下如果遇到登录失效或 unresolved challenge，会停止 watch 并把 watch 标记为 blocked；HTTP 服务继续存活
+- watch 被 `auth_invalid` / `unresolved_challenge` 阻塞后，可用 HTTP `POST /auth/cookie` 更新 `_t`，再用 `POST /watch/start` 恢复，或直接 `POST /watch/start {"force": true}` 强制重试
+- `POST /auth/cookie` / `force=true` 的设计目标是“同一账号刷新登录态”，不是“跨账号热切换”；如果要换号，建议重启进程并使用目标账号配置重新启动
+- `queue.maxsize` 只限制 ready/running 的请求；已进入 `429` 冷却等待的 delayed 请求不受这个上限约束
 
 ## PostgreSQL
 
@@ -83,6 +87,7 @@ CLI 命令名：`discorsair`
 - SQLite 导出：`discorsair --config config/sqlite.json export --output ./export`
 - 导入 PostgreSQL：`discorsair --config config/postgres.json import --input ./export`
 - 同样也支持 PostgreSQL -> SQLite、PostgreSQL -> PostgreSQL 的导出/导入
+- 当前导入导出实现会按表整批读入内存，更适合中小规模数据，不适合超大库直接整库搬迁
 
 ## 开发
 

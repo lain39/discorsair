@@ -241,6 +241,12 @@ class DiscourseClient:
         if callable(setter):
             setter(callback)
 
+    def update_auth_cookie(self, cookie_header: str) -> None:
+        updater = getattr(self._requester, "update_auth_cookie", None)
+        if callable(updater):
+            updater(cookie_header)
+        self._csrf_token = None
+
     def last_response_ok(self) -> bool | None:
         return self._requester.last_response_ok()
 

@@ -20,7 +20,7 @@
 - 启动时按 `app.json -> *.state.json -> 环境变量` 的顺序合并 `auth` 状态；因此 `auth.cookie` 可以不写在文件里，改由 `DISCORSAIR_AUTH_COOKIE` 注入
 - `auth.disabled=true` 时会阻止当前账号启动
 - `auth.note` 仍保留在 `app.json`
-- `auth.status` / `auth.disabled` / `auth.last_ok` / `auth.last_fail` / `auth.last_error` 主要记录在对应的 `*.state.json`
+- `auth.disabled` / `auth.last_ok` / `auth.last_fail` / `auth.last_error` 主要记录在对应的 `*.state.json`
 - 如果你想手工修复账号状态或覆盖运行时记录，直接修改对应的 `*.state.json`，或者删除它后等待后续运行时状态重新写入
 - `request.user_agent` 为空时，优先使用 `impersonate_target` 对应的内置 UA；若没有映射且启用了 FlareSolverr，则会通过 `ua_probe_url`（默认 `data:,`）获取
 - `request.impersonate_target` 指定 `curl_cffi` impersonate 目标；缺省或显式留空都会按空值处理，运行时再依赖内置 UA 映射、UA 探测或后续推断来决定
@@ -59,6 +59,7 @@
 - `server.host` / `server.port` 监听地址
 - 默认仅监听 `127.0.0.1`
 - `server.action_timeout_secs` HTTP 控制接口（如 `/like`、`/reply`）的等待超时；超时返回 `504`，不影响 watch；`0` 表示不设超时
+- HTTP `504` 只表示接口等待超时，不保证这次动作未生效；底层请求可能已经发出，甚至已经成功
 - `server.interval_secs` `serve` 模式下 watch 轮询间隔
 - `server.max_posts_per_interval` `serve` 模式下每轮最多补抓的帖子数；只限制后续 `get_posts_by_ids()` 的补抓，不限制 `get_topic()` 首屏返回的帖子
 - `server.schedule` `serve` 模式下的运行时段（如 `08:00-12:00`）
@@ -68,8 +69,11 @@
 - `server.same_error_stop_threshold` 连续相同错误次数达到阈值后自动停止（0 为关闭）
 - `server.api_key` HTTP 服务鉴权（为空则不启用）
 - 当 `server.host` 或 `discorsair serve --host` 使用非回环地址时，必须配置 `server.api_key`
-- `serve` 模式下，如果 watch 线程或 HTTP 控制接口命中登录失效 / unresolved challenge，会停止 watch、关闭 HTTP 服务，并以非 0 退出
-- 其中登录失效会把账号标记为 `invalid` 并禁用；其他 fatal 错误会写入对应 `*.state.json` 里的 `auth.last_fail` / `auth.last_error`
+- `serve` 模式下，如果 watch 线程或 HTTP 控制接口命中登录失效 / unresolved challenge，会停止 watch 并把 watch 标记为 blocked，但不会关闭 HTTP 服务
+- `auth_invalid` 会把账号运行态标记为 disabled；`unresolved_challenge` 会写入对应 `*.state.json` 里的 `auth.last_fail` / `auth.last_error`
+- watch 进入 blocked 后，普通 `POST /watch/start` 会返回失败和原因；可先用 `POST /auth/cookie` 更新 cookie 再重启，或直接 `POST /watch/start {"force": true}` 强制重试
+- `POST /auth/cookie` 允许传完整 Cookie 字符串，但运行时只会提取并应用其中的 `_t`
+- `POST /auth/cookie` / `force=true` 只面向“同一账号刷新登录态”的恢复场景，不保证跨账号热切换时的请求隔离
 - `run/watch` 命令不读取 `server.schedule`，也不会自动回退到 `server.interval_secs` / `server.max_posts_per_interval`
 - `time.timezone` 时区（用于今日统计与运行时段）
 - 模板文件为 JSONC（允许 `//` 注释），程序也支持读取 JSONC
@@ -114,6 +118,7 @@
   - `discorsair --config config/sqlite.json export --output ./export`
   - `discorsair --config config/postgres.json import --input ./export`
 - PostgreSQL -> SQLite / PostgreSQL -> PostgreSQL 也使用同一套 `export` / `import`
+- 当前导入导出实现会按表整批读取到内存，更适合中小规模数据；超大库建议自行分批迁移
 - 导入时仍按当前配置对应的 `site/account` scope 校验；scope 不匹配会拒绝导入
 
 ## FlareSolverr

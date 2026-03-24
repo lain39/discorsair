@@ -106,5 +106,10 @@ class QueuedDiscourseClient:
             return str(getter() or "")
         return self.get_cookie_header()
 
+    def update_auth_cookie(self, cookie_header: str) -> None:
+        updater = getattr(self._inner, "update_auth_cookie", None)
+        if callable(updater):
+            updater(cookie_header)
+
     def last_response_ok(self) -> bool | None:
         return self._inner.last_response_ok()

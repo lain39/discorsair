@@ -633,6 +633,16 @@ class Requester:
     def get_persist_candidate_cookie_header(self) -> str:
         return self._persist_candidate_cookie_header
 
+    def update_auth_cookie(self, cookie_header: str) -> None:
+        normalized = str(cookie_header or "").strip()
+        with self._lock:
+            self._session.cookie_header = normalized
+            self._session.cookies = parse_cookie_header(normalized)
+            self._session.cf_clearance_cache.clear()
+            self._session.last_response_ok = None
+            self._csrf_token_hint = ""
+            self._persist_candidate_cookie_header = _persistent_cookie_header_from_cookies(self._session.cookies)
+
     def set_cookie_persist_callback(self, callback: Callable[[str], bool | None] | None) -> None:
         self._cookie_persist_callback = callback
 

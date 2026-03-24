@@ -108,6 +108,7 @@ discorsair export --output ./export
 说明：
 
 - 当前只支持 NDJSON 格式
+- 当前实现会按表整批读入内存，更适合中小规模数据；超大库不建议直接用这一套命令整库搬迁
 - 读取当前 `--config` 对应的 `storage.backend`
 - SQLite 会导出当前库文件；PostgreSQL 会导出当前 DSN 对应库
 
@@ -126,6 +127,7 @@ discorsair import --input ./export
 说明：
 
 - 当前只支持 NDJSON 格式
+- 当前实现会按表整批读入内存，更适合中小规模数据；超大库不建议直接用这一套命令整库搬迁
 - 导入前会先按当前 `storage.backend` 初始化目标 schema
 - 目标是 SQLite 时写入当前库文件；目标是 PostgreSQL 时写入当前 DSN 对应库
 - 同一份导出重复导入时，主键表会收敛到最终状态，去重表和插件动作日志不会无限重复插入
@@ -145,14 +147,16 @@ discorsair serve --host 0.0.0.0 --port 17880
 说明：
 
 - 如果绑定 `0.0.0.0` 或其他非回环地址，需先配置 `server.api_key`
-- 如果 watch 线程或控制接口触发登录失效 / unresolved challenge，服务会自停并以非 0 退出
+- 如果 watch 线程或控制接口触发登录失效 / unresolved challenge，watch 会进入 blocked 状态，但 HTTP 服务继续存活
 - `server.schedule`、`server.interval_secs`、`server.max_posts_per_interval` 只用于 `serve` 模式里的 watch 线程
 
 可用接口：
 
-- `POST /watch/start`（请求体可选：`{"use_schedule": true|false}`；返回：`{"ok": true|false}`）
+- `POST /watch/start`（请求体可选：`{"use_schedule": true|false, "force": true|false}`；blocked 时返回失败原因；`force=true` 可强制重试）
 - `POST /watch/config`（请求体：`{"use_unseen": true|false, "timings_per_topic": 30, "max_posts_per_interval": 200}`）
 - `POST /watch/stop`（返回：`{"ok": true|false, "already_stopped": true|false}`）
+- `POST /auth/cookie`（请求体：`{"cookie": "_t=..."}` 或完整 Cookie 字符串；运行时只提取 `_t`）
+- 上面两个恢复接口按“同一账号刷新登录态”设计，不承诺支持跨账号热切换
 - `GET /watch/status`
 - `POST /like`（请求体：`{"post_id": 123, "emoji": "heart"}`）
 - `POST /reply`（请求体：`{"topic_id": 123, "raw": "text", "category": 1}`）
@@ -166,9 +170,9 @@ discorsair serve --host 0.0.0.0 --port 17880
 常见错误响应：
 
 - `401 {"error":"unauthorized"}`：缺少或错误的 `X-API-Key`
-- `401 {"error":"not_logged_in"}`：请求命中登录失效；服务会触发 fatal stop 并关闭
-- `503 {"error":"challenge_unresolved"}`：过盾后仍被 Cloudflare 阻断；服务会触发 fatal stop 并关闭
-- `504 {"error":"timeout"}`：控制接口执行超时
+- `401 {"error":"not_logged_in"}`：请求命中登录失效；watch 会进入 `auth_invalid` blocked 状态
+- `503 {"error":"challenge_unresolved"}`：过盾后仍被 Cloudflare 阻断；watch 会进入 `unresolved_challenge` blocked 状态
+- `504 {"error":"timeout"}`：控制接口执行超时；只表示调用方等待超时，不保证对应动作未执行
 - `500 {"error":"internal"}`：其他未处理异常
 
 **接口返回（示例）**
@@ -185,6 +189,9 @@ discorsair serve --host 0.0.0.0 --port 17880
   "last_error": null,
   "last_error_at": null,
   "next_run": "2026-03-17T08:00:00",
+  "start_blocked_reason": null,
+  "last_stop_reason": null,
+  "recovery_required": false,
   "storage_enabled": true,
   "storage_path": "data/discorsair.example.db",
   "stats_total": {
@@ -223,6 +230,8 @@ discorsair serve --host 0.0.0.0 --port 17880
 - `use_schedule` 表示当前运行中的 watch 线程是否真的按 `server.schedule` 控制
 - `stop_requested == true` 表示已经收到过停止请求；线程可能仍在收尾，也可能已经停完
 - `stopping == true` 表示已经收到 `POST /watch/stop`，且当前 watch 线程还没完全退出
+- `start_blocked_reason` 为 `auth_invalid` 或 `unresolved_challenge` 时，普通 `POST /watch/start` 会被拒绝
+- `recovery_required == true` 表示当前需要先更新 `_t` 或显式 `force` 重试
 - 只有 `use_schedule == true` 时，`next_run` 才有值；手动用 `POST /watch/start {"use_schedule": false}` 启动时，`next_run` 为 `null`
 - `POST /watch/stop` 是幂等的：线程正在运行时会返回 `{"ok": true, "already_stopped": false}`；线程在处理这次 stop 请求之前就已经停完时，会返回 `{"ok": true, "already_stopped": true}`
 - `POST /watch/stop` 返回 `{"ok": false}` 只表示当前没有可停止的 watch 实例
@@ -248,6 +257,25 @@ discorsair serve --host 0.0.0.0 --port 17880
 {
   "ok": true,
   "already_stopped": true
+}
+```
+
+- `POST /watch/start` blocked 示例：
+
+```json
+{
+  "ok": false,
+  "reason": "auth_invalid",
+  "detail": "watch start is blocked until auth is refreshed or force=true is used"
+}
+```
+
+- `POST /auth/cookie` 成功示例：
+
+```json
+{
+  "ok": true,
+  "cookie_updated": true
 }
 ```
 

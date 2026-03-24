@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import logging
 
+from discorsair.core.requester import ChallengeUnresolvedError
 from discorsair.discourse.client import DiscourseAuthError
+from discorsair.runtime.state import persistent_auth_cookie_header
 from discorsair.server.http_server import WatchController, serve, validate_server_binding
 from ..types import CommandOutcome
 from .context import RuntimeCommandContext
@@ -25,6 +27,15 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
     def _on_action_success() -> None:
         context.state.mark_account_ok()
         context.state.save_cookies(context.services.base_client)
+
+    def _update_auth_cookie(cookie_header: str) -> dict[str, object]:
+        normalized_cookie = persistent_auth_cookie_header(cookie_header)
+        if not normalized_cookie:
+            raise ValueError("cookie must include a non-empty _t")
+        if not context.state.recover_account_with_cookie(normalized_cookie):
+            raise RuntimeError("failed to persist updated auth cookie")
+        context.services.base_client.update_auth_cookie(normalized_cookie)
+        return {"cookie_updated": True}
 
     controller = WatchController(
         client=context.services.client,
@@ -46,6 +57,8 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
         same_error_stop_threshold=server.same_error_stop_threshold,
         on_stop=lambda: context.state.save_cookies(context.services.base_client),
         on_auth_invalid=lambda exc: context.state.mark_account_fail(exc, mark_invalid=True, disable=True),
+        on_unresolved_challenge=lambda exc: context.state.mark_account_fail(exc, mark_invalid=False, disable=False),
+        on_force_start=lambda reason: context.state.set_account_disabled(False),
     )
     serve(
         host=host,
@@ -55,10 +68,13 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
         api_key=api_key,
         action_timeout_secs=server.action_timeout_secs,
         on_action_success=_on_action_success,
+        auth_cookie_updater=_update_auth_cookie,
     )
     controller.wait_until_stopped()
     fatal_error = controller.fatal_error()
     if fatal_error is not None:
+        if isinstance(fatal_error, (DiscourseAuthError, ChallengeUnresolvedError)):
+            return CommandOutcome(exit_code=0)
         if not isinstance(fatal_error, DiscourseAuthError):
             context.state.mark_account_fail(fatal_error, mark_invalid=False, disable=False)
         return CommandOutcome(exit_code=1)

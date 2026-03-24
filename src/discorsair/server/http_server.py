@@ -59,6 +59,8 @@ class WatchController:
         timezone_name: str,
         on_stop: Callable[[], None] | None = None,
         on_auth_invalid: Callable[[Exception], None] | None = None,
+        on_unresolved_challenge: Callable[[Exception], None] | None = None,
+        on_force_start: Callable[[str], bool] | None = None,
         on_fatal: Callable[[], None] | None = None,
     ) -> None:
         self._client = client
@@ -80,6 +82,8 @@ class WatchController:
         self._timezone_name = timezone_name
         self._on_stop = on_stop
         self._on_auth_invalid = on_auth_invalid
+        self._on_unresolved_challenge = on_unresolved_challenge
+        self._on_force_start = on_force_start
         self._on_fatal = on_fatal
         self._runtime = WatchRuntime()
         self._control_lock = threading.RLock()
@@ -87,12 +91,31 @@ class WatchController:
         self._last_error_sig: str | None = None
         self._same_error_count = 0
         self._fatal_error: Exception | None = None
+        self._start_blocked_reason: str | None = None
+        self._last_stop_reason: str | None = None
         self._sent_notification_ids_mem: set[int] = set()
 
     def start(self, use_schedule: bool = True) -> bool:
+        return bool(self.start_result(use_schedule=use_schedule)["ok"])
+
+    def start_result(self, *, use_schedule: bool = True, force: bool = False) -> dict[str, Any]:
         with self._control_lock:
             if self._runtime.thread and self._runtime.thread.is_alive():
-                return False
+                return {"ok": False, "reason": "already_running"}
+            blocked_reason = self._start_blocked_reason
+            if self._start_blocked_reason and not force:
+                return {
+                    "ok": False,
+                    "reason": self._start_blocked_reason,
+                    "detail": "watch start is blocked until auth is refreshed or force=true is used",
+                }
+            if force and blocked_reason and self._on_force_start is not None:
+                if self._on_force_start(blocked_reason) is False:
+                    return {
+                        "ok": False,
+                        "reason": "force_start_failed",
+                        "detail": "failed to clear disabled flag before force start",
+                    }
             stop_event = threading.Event()
             self._runtime.stop_event = stop_event
             self._runtime.started_at = _now()
@@ -101,6 +124,7 @@ class WatchController:
             self._last_error_sig = None
             self._same_error_count = 0
             self._fatal_error = None
+            self._start_blocked_reason = None
 
             def _run() -> None:
                 restarts = 0
@@ -120,7 +144,7 @@ class WatchController:
             self._runtime.thread = t
             t.start()
         logging.getLogger(__name__).info("watch started (schedule=%s)", use_schedule)
-        return True
+        return {"ok": True}
 
     def configure(
         self,
@@ -204,8 +228,13 @@ class WatchController:
             if not self._runtime.stop_event:
                 return {"ok": False, "already_stopped": False}
             logging.getLogger(__name__).info("watch stop requested")
+            self._last_stop_reason = "manual_stop"
             self._finalize_stop()
             return {"ok": True, "already_stopped": False}
+
+    def clear_start_blocked_reason(self) -> None:
+        with self._control_lock:
+            self._start_blocked_reason = None
 
     def status(self) -> dict[str, Any]:
         running = bool(self._runtime.thread and self._runtime.thread.is_alive())
@@ -224,6 +253,9 @@ class WatchController:
             "stop_requested": stop_requested,
             "stopping": bool(running and stop_requested),
             "next_run": next_run,
+            "start_blocked_reason": self._start_blocked_reason,
+            "last_stop_reason": self._last_stop_reason,
+            "recovery_required": bool(self._start_blocked_reason),
             **status_flow(
                 self._store,
                 plugins=self._plugin_manager.snapshot() if self._plugin_manager is not None else None,
@@ -359,8 +391,12 @@ class WatchController:
         *,
         detail: str,
         extra: dict[str, str] | None = None,
+        block_start: bool = False,
         notify_fatal: bool = False,
     ) -> None:
+        self._last_stop_reason = stop_type
+        if block_start:
+            self._start_blocked_reason = stop_type
         self._notify_stop(stop_type, detail=detail, extra=extra)
         self._finalize_stop()
         if notify_fatal and self._on_fatal:
@@ -375,16 +411,17 @@ class WatchController:
         logging.getLogger(__name__).error("%s due to auth error: %s", source, exc)
         if self._on_auth_invalid:
             self._on_auth_invalid(exc)
-        self._handle_fatal_stop("auth_invalid", exc, source=source, notify_message=f"{source}: auth error: {exc}")
+        self._fatal_error = exc
+        self.report_error(str(exc), f"{source}: auth error: {exc}")
+        self._stop_with_type("auth_invalid", detail=str(exc), extra={"source": source}, block_start=True)
 
     def handle_unresolved_challenge(self, exc: Exception, *, source: str) -> None:
         logging.getLogger(__name__).error("%s due to unresolved challenge: %s", source, exc)
-        self._handle_fatal_stop(
-            "unresolved_challenge",
-            exc,
-            source=source,
-            notify_message=f"{source}: unresolved challenge: {exc}",
-        )
+        if self._on_unresolved_challenge:
+            self._on_unresolved_challenge(exc)
+        self._fatal_error = exc
+        self.report_error(str(exc), f"{source}: unresolved challenge: {exc}")
+        self._stop_with_type("unresolved_challenge", detail=str(exc), extra={"source": source}, block_start=True)
 
     def _finalize_stop(self) -> None:
         if self._runtime.stop_event:
@@ -538,8 +575,8 @@ class ControlHandler(BaseHTTPRequestHandler):
             if self.path == "/watch/start":
                 data = self._json()
                 use_schedule = _json_bool(data, "use_schedule", default=True)
-                ok = self.server.watch_controller.start(use_schedule=use_schedule)
-                self._send(200, {"ok": ok})
+                force = _json_bool(data, "force", default=False)
+                self._send(200, self.server.watch_controller.start_result(use_schedule=use_schedule, force=force))
                 return
             if self.path == "/watch/config":
                 data = self._json()
@@ -557,6 +594,16 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/watch/stop":
                 self._send(200, self.server.watch_controller.stop_result())
+                return
+            if self.path == "/auth/cookie":
+                data = self._json()
+                cookie = _json_string(data, "cookie", default="")
+                updater = self.server.auth_cookie_updater
+                if updater is None:
+                    raise RuntimeError("auth cookie updater is not configured")
+                result = updater(cookie)
+                self.server.watch_controller.clear_start_blocked_reason()
+                self._send(200, {"ok": True, **(result or {})})
                 return
             if self.path == "/like":
                 data = self._json()
@@ -603,11 +650,9 @@ class ControlHandler(BaseHTTPRequestHandler):
         except DiscourseAuthError as exc:
             self.server.watch_controller.handle_auth_invalid(exc, source="http auth error")
             self._send(401, {"error": "not_logged_in"})
-            self.server.request_shutdown()
         except ChallengeUnresolvedError as exc:
             self.server.watch_controller.handle_unresolved_challenge(exc, source="http unresolved challenge")
             self._send(503, {"error": "challenge_unresolved"})
-            self.server.request_shutdown()
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).error("http POST error: %s", exc)
             self.server.watch_controller.report_error(str(exc), f"http POST error: {exc}")
@@ -627,6 +672,7 @@ class ControlServer(ThreadingHTTPServer):
         api_key: str | None = None,
         action_timeout_secs: float = 60.0,
         on_action_success: Callable[[], None] | None = None,
+        auth_cookie_updater: Callable[[str], dict[str, Any] | None] | None = None,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.client = client
@@ -634,6 +680,7 @@ class ControlServer(ThreadingHTTPServer):
         self.api_key = api_key or ""
         self.action_timeout_secs = max(float(action_timeout_secs), 0.0)
         self.on_action_success = on_action_success
+        self.auth_cookie_updater = auth_cookie_updater
         self._shutdown_requested = False
         self._shutdown_lock = threading.Lock()
 
@@ -653,6 +700,7 @@ def serve(
     api_key: str | None = None,
     action_timeout_secs: float = 60.0,
     on_action_success: Callable[[], None] | None = None,
+    auth_cookie_updater: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> None:
     validate_server_binding(host, api_key)
     httpd = ControlServer(
@@ -663,6 +711,7 @@ def serve(
         api_key=api_key,
         action_timeout_secs=action_timeout_secs,
         on_action_success=on_action_success,
+        auth_cookie_updater=auth_cookie_updater,
     )
     watch_controller.set_on_fatal(httpd.request_shutdown)
     logging.getLogger(__name__).info("server listening on %s:%s", host, port)

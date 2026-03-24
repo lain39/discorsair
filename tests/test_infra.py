@@ -460,18 +460,34 @@ class _DummyWatchController:
         self._use_unseen = False
         self._timings_per_topic = 30
         self._max_posts_per_interval = 200
-        self.start_calls: list[bool] = []
+        self._start_blocked_reason: str | None = None
+        self._last_stop_reason: str | None = None
+        self.start_calls: list[tuple[bool, bool]] = []
         self.stop_calls = 0
         self.auth_invalid_calls: list[tuple[str, str]] = []
         self.unresolved_challenge_calls: list[tuple[str, str]] = []
         self.fatal_callback = None
 
     def status(self) -> dict[str, object]:
-        return {"running": False, "stats_total": {}, "stats_today": {}}
+        return {
+            "running": False,
+            "stats_total": {},
+            "stats_today": {},
+            "start_blocked_reason": self._start_blocked_reason,
+            "last_stop_reason": self._last_stop_reason,
+            "recovery_required": bool(self._start_blocked_reason),
+        }
 
     def start(self, use_schedule: bool = True) -> bool:
-        self.start_calls.append(use_schedule)
+        self.start_calls.append((use_schedule, False))
         return True
+
+    def start_result(self, *, use_schedule: bool = True, force: bool = False) -> dict[str, object]:
+        self.start_calls.append((use_schedule, force))
+        if self._start_blocked_reason and not force:
+            return {"ok": False, "reason": self._start_blocked_reason}
+        self._start_blocked_reason = None
+        return {"ok": True}
 
     def stop(self) -> bool:
         self.stop_calls += 1
@@ -479,15 +495,23 @@ class _DummyWatchController:
 
     def stop_result(self) -> dict[str, bool]:
         self.stop_calls += 1
+        self._last_stop_reason = "manual_stop"
         return {"ok": True, "already_stopped": True}
 
     def handle_auth_invalid(self, exc: Exception, *, source: str) -> None:
         self.auth_invalid_calls.append((source, str(exc)))
+        self._start_blocked_reason = "auth_invalid"
+        self._last_stop_reason = "auth_invalid"
         self.stop()
 
     def handle_unresolved_challenge(self, exc: Exception, *, source: str) -> None:
         self.unresolved_challenge_calls.append((source, str(exc)))
+        self._start_blocked_reason = "unresolved_challenge"
+        self._last_stop_reason = "unresolved_challenge"
         self.stop()
+
+    def clear_start_blocked_reason(self) -> None:
+        self._start_blocked_reason = None
 
     def configure(
         self,
@@ -585,6 +609,7 @@ class ControlHandlerTests(unittest.TestCase):
         watch_controller: _DummyWatchController | None = None,
         shutdown: Mock | None = None,
         on_action_success: Mock | None = None,
+        auth_cookie_updater: Mock | None = None,
     ) -> tuple[int, dict[str, object]]:
         handler = object.__new__(ControlHandler)
         request_headers = dict(headers or {})
@@ -608,6 +633,7 @@ class ControlHandlerTests(unittest.TestCase):
             shutdown=shutdown or (lambda: None),
             request_shutdown=shutdown or (lambda: None),
             on_action_success=on_action_success,
+            auth_cookie_updater=auth_cookie_updater,
         )
         captured: list[tuple[int, dict[str, object]]] = []
         handler._send = lambda code, data: captured.append((code, data))  # type: ignore[method-assign]
@@ -684,7 +710,32 @@ class ControlHandlerTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(data, {"ok": True})
-        self.assertEqual(server.watch_controller.start_calls, [False])
+        self.assertEqual(server.watch_controller.start_calls, [(False, False)])
+
+    def test_watch_start_forwards_force_flag(self) -> None:
+        (status, data), server = self._run_handler(
+            "POST",
+            "/watch/start",
+            body={"use_schedule": True, "force": True},
+            headers={"X-API-Key": "secret"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"ok": True})
+        self.assertEqual(server.watch_controller.start_calls, [(True, True)])
+
+    def test_watch_start_reports_blocked_reason_without_force(self) -> None:
+        watch_controller = _DummyWatchController()
+        watch_controller._start_blocked_reason = "auth_invalid"
+        (status, data), server = self._run_handler(
+            "POST",
+            "/watch/start",
+            body={"use_schedule": False},
+            headers={"X-API-Key": "secret"},
+            watch_controller=watch_controller,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"ok": False, "reason": "auth_invalid"})
+        self.assertEqual(server.watch_controller.start_calls, [(False, False)])
 
     def test_watch_start_rejects_invalid_json(self) -> None:
         (status, data), server = self._run_handler(
@@ -707,6 +758,56 @@ class ControlHandlerTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(data, {"error": "bad_request", "detail": "use_schedule must be a boolean"})
         self.assertEqual(server.watch_controller.start_calls, [])
+
+    def test_watch_start_rejects_non_boolean_force(self) -> None:
+        (status, data), server = self._run_handler(
+            "POST",
+            "/watch/start",
+            body={"force": "yes"},
+            headers={"X-API-Key": "secret"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "bad_request", "detail": "force must be a boolean"})
+        self.assertEqual(server.watch_controller.start_calls, [])
+
+    def test_auth_cookie_updates_runtime_and_clears_blocked_reason(self) -> None:
+        updater = Mock(return_value={"cookie_updated": True})
+        watch_controller = _DummyWatchController()
+        watch_controller._start_blocked_reason = "auth_invalid"
+        (status, data), server = self._run_handler(
+            "POST",
+            "/auth/cookie",
+            body={"cookie": "_t=new-token; cf_clearance=abc"},
+            headers={"X-API-Key": "secret"},
+            watch_controller=watch_controller,
+            auth_cookie_updater=updater,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"ok": True, "cookie_updated": True})
+        updater.assert_called_once_with("_t=new-token; cf_clearance=abc")
+        self.assertIsNone(watch_controller.status()["start_blocked_reason"])
+
+    def test_auth_cookie_requires_configured_updater(self) -> None:
+        (status, data), _ = self._run_handler(
+            "POST",
+            "/auth/cookie",
+            body={"cookie": "_t=new-token"},
+            headers={"X-API-Key": "secret"},
+        )
+        self.assertEqual(status, 500)
+        self.assertEqual(data, {"error": "internal"})
+
+    def test_auth_cookie_returns_bad_request_when_updater_rejects_cookie(self) -> None:
+        updater = Mock(side_effect=ValueError("cookie must include a non-empty _t"))
+        (status, data), _ = self._run_handler(
+            "POST",
+            "/auth/cookie",
+            body={"cookie": "cf_clearance=abc"},
+            headers={"X-API-Key": "secret"},
+            auth_cookie_updater=updater,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "bad_request", "detail": "cookie must include a non-empty _t"})
 
     def test_watch_stop_calls_controller(self) -> None:
         (status, data), server = self._run_handler(
@@ -785,7 +886,7 @@ class ControlHandlerTests(unittest.TestCase):
         self.assertEqual(server.client.replies, [(9, "hello", 3)])
         on_action_success.assert_called_once_with()
 
-    def test_like_auth_error_stops_watch_and_shuts_down_server(self) -> None:
+    def test_like_auth_error_stops_watch_without_shutting_down_server(self) -> None:
         client = _DummyClient()
         client.reaction_error = DiscourseAuthError("not_logged_in")
         shutdown = Mock()
@@ -809,9 +910,10 @@ class ControlHandlerTests(unittest.TestCase):
         self.assertEqual(data, {"error": "not_logged_in"})
         self.assertEqual(server.watch_controller.stop_calls, 1)
         self.assertEqual(server.watch_controller.auth_invalid_calls, [("http auth error", "not_logged_in")])
-        shutdown.assert_called_once_with()
+        shutdown.assert_not_called()
+        self.assertEqual(server.watch_controller.status()["start_blocked_reason"], "auth_invalid")
 
-    def test_reply_challenge_error_stops_watch_and_shuts_down_server(self) -> None:
+    def test_reply_challenge_error_stops_watch_without_shutting_down_server(self) -> None:
         client = _DummyClient()
         client.reply_error = ChallengeUnresolvedError("challenge still present after solve")
         shutdown = Mock()
@@ -838,7 +940,8 @@ class ControlHandlerTests(unittest.TestCase):
             server.watch_controller.unresolved_challenge_calls,
             [("http unresolved challenge", "challenge still present after solve")],
         )
-        shutdown.assert_called_once_with()
+        shutdown.assert_not_called()
+        self.assertEqual(server.watch_controller.status()["start_blocked_reason"], "unresolved_challenge")
 
     def test_like_timeout_returns_504(self) -> None:
         client = _DummyClient()
@@ -933,7 +1036,7 @@ class ControlServerIntegrationTests(unittest.TestCase):
                 thread.join(timeout=2)
             server.server_close()
 
-    def test_real_http_reply_challenge_error_stops_server(self) -> None:
+    def test_real_http_reply_challenge_error_keeps_server_running(self) -> None:
         client = _DummyClient()
         client.reply_error = ChallengeUnresolvedError("challenge still present after solve")
         watch_controller = _DummyWatchController()
@@ -956,8 +1059,15 @@ class ControlServerIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(status, 503)
             self.assertEqual(data, {"error": "challenge_unresolved"})
-            thread.join(timeout=2)
-            self.assertFalse(thread.is_alive())
+            status_data, payload = self._request_json(
+                server.server_address[1],
+                "GET",
+                "/watch/status",
+                headers={"X-API-Key": "secret"},
+            )
+            self.assertEqual(status_data, 200)
+            self.assertEqual(payload["start_blocked_reason"], "unresolved_challenge")
+            self.assertTrue(thread.is_alive())
             self.assertEqual(watch_controller.stop_calls, 1)
             self.assertEqual(
                 watch_controller.unresolved_challenge_calls,

@@ -244,6 +244,21 @@ class RequesterTests(unittest.TestCase):
         solve.assert_called_once()
         backoff.assert_called_once()
 
+    def test_update_auth_cookie_resets_runtime_auth_state(self) -> None:
+        requester = self._build_requester(cookie_header="_t=old-token; cf_clearance=abc")
+        requester._session.cf_clearance_cache["proxy"] = "cached-clearance"
+        requester._session.last_response_ok = False
+        requester._csrf_token_hint = "csrf-hint"
+
+        requester.update_auth_cookie("_t=new-token")
+
+        self.assertEqual(requester.get_cookie_header(), "_t=new-token")
+        self.assertEqual(requester.get_persist_candidate_cookie_header(), "_t=new-token")
+        self.assertEqual(requester._session.cookies, {"_t": "new-token"})
+        self.assertEqual(requester._session.cf_clearance_cache, {})
+        self.assertIsNone(requester.last_response_ok())
+        self.assertEqual(requester.get_csrf_token_hint(), "")
+
     def test_challenge_retry_replaces_csrf_header_from_flaresolverr_html(self) -> None:
         requester = self._build_requester(
             flaresolverr_base_url="http://flaresolverr:8191",

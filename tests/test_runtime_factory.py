@@ -188,12 +188,11 @@ class RuntimeFactoryTests(unittest.TestCase):
         self.assertEqual(notifier._prefix, "[Discorsair][main]")
         self.assertEqual(notifier._error_prefix, "[Discorsair][error][main]")
 
-    def test_build_client_ignores_auth_status_when_account_not_disabled(self) -> None:
+    def test_build_client_allows_account_when_not_disabled(self) -> None:
         app_config = {
             "site": {"base_url": "https://forum.example"},
             "auth": {
                 "cookie": "_t=file-token",
-                "status": "invalid",
                 "disabled": False,
             },
         }
@@ -259,7 +258,7 @@ class RuntimeFactoryTests(unittest.TestCase):
                 """
 {
   "site": {"base_url": "https://forum.example"},
-  "auth": {"cookie": "_t=file-token", "status": "active", "disabled": false}
+  "auth": {"cookie": "_t=file-token", "disabled": false}
 }
 """.strip()
                 + "\n",
@@ -268,7 +267,7 @@ class RuntimeFactoryTests(unittest.TestCase):
             state_path.write_text(
                 """
 {
-  "auth": {"cookie": "_t=state-token", "status": "invalid", "disabled": true}
+  "auth": {"cookie": "_t=state-token", "disabled": true}
 }
 """.strip()
                 + "\n",
@@ -278,7 +277,6 @@ class RuntimeFactoryTests(unittest.TestCase):
                 app_config = load_runtime_app_config(str(config_path))
 
         self.assertEqual(app_config["auth"]["cookie"], "_t=state-token")
-        self.assertEqual(app_config["auth"]["status"], "invalid")
         self.assertTrue(app_config["auth"]["disabled"])
 
     def test_load_runtime_app_config_treats_empty_state_file_as_empty_object(self) -> None:
@@ -300,7 +298,6 @@ class RuntimeFactoryTests(unittest.TestCase):
                 app_config = load_runtime_app_config(str(config_path))
 
         self.assertEqual(app_config["auth"]["cookie"], "_t=file-token")
-        self.assertEqual(app_config["auth"]["status"], "active")
         self.assertFalse(app_config["auth"]["disabled"])
 
     def test_build_notifier_uses_env_overridden_account_name(self) -> None:

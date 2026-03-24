@@ -171,6 +171,59 @@ class CliRuntimeTests(unittest.TestCase):
             self.assertEqual(save_state.call_count, 2)
             self.assertEqual(config["auth"]["cookie"], "_t=new-cookie")
 
+    def test_state_store_recovers_account_with_cookie_and_clears_invalid_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "app.json"
+            state_path = self._state_path(config_path)
+            config = {
+                "_path": str(config_path),
+                "auth": {
+                    "cookie": "_t=old-cookie",
+                    "disabled": True,
+                    "last_error": "not_logged_in",
+                    "last_fail": "2026-03-24T00:00:00Z",
+                },
+            }
+            state = RuntimeStateStore(config)
+
+            self.assertTrue(state.recover_account_with_cookie("_t=new-cookie; cf_clearance=abc"))
+
+            self.assertEqual(config["auth"]["cookie"], "_t=new-cookie")
+            self.assertEqual(config["auth"]["disabled"], False)
+            self.assertEqual(config["auth"]["last_error"], "")
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["auth"]["cookie"], "_t=new-cookie")
+            self.assertEqual(saved["auth"]["disabled"], False)
+            self.assertEqual(saved["auth"]["last_error"], "")
+
+    def test_state_store_write_removes_legacy_auth_status_from_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "app.json"
+            state_path = self._state_path(config_path)
+            state_path.write_text(
+                """
+{
+  "auth": {
+    "cookie": "_t=old-cookie",
+    "status": "invalid",
+    "disabled": true
+  }
+}
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            config = {"_path": str(config_path), "auth": {"cookie": "_t=old-cookie", "disabled": False, "last_ok": ""}}
+            state = RuntimeStateStore(config)
+
+            state.mark_account_ok()
+
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertNotIn("status", saved["auth"])
+            self.assertEqual(saved["auth"]["cookie"], "_t=old-cookie")
+            self.assertTrue(saved["auth"]["disabled"])
+            self.assertTrue(saved["auth"]["last_ok"].endswith("Z"))
+
     def test_state_store_does_not_persist_env_overridden_sensitive_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "app.json"
@@ -184,7 +237,7 @@ class CliRuntimeTests(unittest.TestCase):
                     ("storage", "postgres", "dsn"),
                 ],
                 "site": {"base_url": "https://forum.example", "timeout_secs": 20},
-                "auth": {"cookie": "_t=env-cookie", "last_ok": "", "status": "active", "disabled": False},
+                "auth": {"cookie": "_t=env-cookie", "last_ok": "", "disabled": False},
                 "server": {"api_key": "env-key"},
                 "notify": {"url": "https://env-notify.example"},
                 "storage": {"backend": "postgres", "postgres": {"dsn": "postgresql://env-user:env-pass@127.0.0.1:5432/discorsair"}},
@@ -214,7 +267,6 @@ class CliRuntimeTests(unittest.TestCase):
                       "auth": {
                         // keep this comment
                         "cookie": "_t=file-cookie",
-                        "status": "active",
                         "disabled": false,
                         "last_ok": "",
                         "last_fail": "",
@@ -231,7 +283,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "site": {"base_url": "https://forum.example", "timeout_secs": 20},
                 "auth": {
                     "cookie": "_t=file-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -262,7 +313,6 @@ class CliRuntimeTests(unittest.TestCase):
                       "auth": {
                         // cookie should stay from file
                         "cookie": "_t=file-cookie",
-                        "status": "active",
                         "disabled": false,
                         "last_ok": "",
                         "last_fail": "",
@@ -280,7 +330,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "site": {"base_url": "https://forum.example", "timeout_secs": 20},
                 "auth": {
                     "cookie": "_t=env-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -322,7 +371,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "site": {"base_url": "https://forum.example", "timeout_secs": 20},
                 "auth": {
                     "cookie": "_t=env-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -360,7 +408,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "site": {"base_url": "https://forum.example", "timeout_secs": 20},
                 "auth": {
                     "cookie": "_t=file-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -373,7 +420,6 @@ class CliRuntimeTests(unittest.TestCase):
 
             saved = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["auth"]["cookie"], "_t=file-cookie")
-            self.assertEqual(saved["auth"]["status"], "active")
             self.assertFalse(saved["auth"]["disabled"])
             self.assertTrue(saved["auth"]["last_ok"].endswith("Z"))
 
@@ -403,7 +449,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "logging": {"path": "old.log"},
                 "auth": {
                     "cookie": "_t=file-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -435,7 +480,6 @@ class CliRuntimeTests(unittest.TestCase):
             self.assertNotIn("auth", saved)
             state_saved = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(state_saved["auth"]["cookie"], "_t=file-cookie")
-            self.assertEqual(state_saved["auth"]["status"], "active")
             self.assertFalse(state_saved["auth"]["disabled"])
             self.assertTrue(state_saved["auth"]["last_ok"].endswith("Z"))
 
@@ -447,7 +491,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "site": {"base_url": "https://forum.example"},
                 "auth": {
                     "cookie": "_t=file-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -503,7 +546,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "logging": {"path": "old.log"},
                 "auth": {
                     "cookie": "_t=file-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -538,7 +580,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "site": {"base_url": "https://forum.example", "timeout_secs": 20},
                 "auth": {
                     "cookie": "_t=file-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -578,7 +619,6 @@ class CliRuntimeTests(unittest.TestCase):
                 "site": {"base_url": "https://forum.example", "timeout_secs": 20},
                 "auth": {
                     "cookie": "_t=file-cookie",
-                    "status": "active",
                     "disabled": False,
                     "last_ok": "",
                     "last_fail": "",
@@ -597,12 +637,12 @@ class CliRuntimeTests(unittest.TestCase):
             config_one = {
                 "_path": str(config_path),
                 "site": {"base_url": "https://forum.example"},
-                "auth": {"cookie": "_t=file-cookie", "status": "active", "disabled": False},
+                "auth": {"cookie": "_t=file-cookie", "disabled": False},
             }
             config_two = {
                 "_path": str(config_path),
                 "site": {"base_url": "https://forum.example"},
-                "auth": {"cookie": "_t=file-cookie", "status": "active", "disabled": False},
+                "auth": {"cookie": "_t=file-cookie", "disabled": False},
             }
             state_one = RuntimeStateStore(config_one)
             state_two = RuntimeStateStore(config_two)
@@ -1073,7 +1113,9 @@ class CliRuntimeTests(unittest.TestCase):
 
     def test_handle_authenticated_serve_wires_stop_and_auth_invalid_callbacks(self) -> None:
         state = Mock()
-        services = types.SimpleNamespace(client=object(), base_client=object(), store=object(), plugin_manager=None)
+        state.set_account_disabled.return_value = True
+        base_client = Mock()
+        services = types.SimpleNamespace(client=object(), base_client=base_client, store=object(), plugin_manager=None)
         args = types.SimpleNamespace(command="serve", host=None, port=None)
         context = RuntimeCommandContext(
             settings=self._settings(),
@@ -1093,16 +1135,26 @@ class CliRuntimeTests(unittest.TestCase):
         serve_kwargs = serve_fn.call_args.kwargs
         controller_kwargs["on_stop"]()
         controller_kwargs["on_auth_invalid"](RuntimeError("not_logged_in"))
+        controller_kwargs["on_unresolved_challenge"](ChallengeUnresolvedError("challenge still present after solve"))
+        self.assertTrue(controller_kwargs["on_force_start"]("auth_invalid"))
+        updater_result = serve_kwargs["auth_cookie_updater"]("_t=new-token; cf_clearance=abc")
         serve_kwargs["on_action_success"]()
+        self.assertEqual(updater_result, {"cookie_updated": True})
         self.assertEqual(state.mark_account_ok.call_count, 1)
-        self.assertEqual(state.mark_account_fail.call_count, 1)
+        self.assertEqual(state.mark_account_fail.call_count, 2)
+        state.set_account_disabled.assert_called_once_with(False)
+        state.recover_account_with_cookie.assert_called_once_with("_t=new-token")
+        base_client.update_auth_cookie.assert_called_once_with("_t=new-token")
         self.assertEqual(state.save_cookies.call_count, 2)
         controller.wait_until_stopped.assert_called_once_with()
         self.assertEqual(state.save_cookies.call_args_list[0].args, (services.base_client,))
         self.assertEqual(state.save_cookies.call_args_list[1].args, (services.base_client,))
-        mark_args, mark_kwargs = state.mark_account_fail.call_args
-        self.assertEqual(str(mark_args[0]), "not_logged_in")
-        self.assertEqual(mark_kwargs, {"mark_invalid": True, "disable": True})
+        first_mark_args, first_mark_kwargs = state.mark_account_fail.call_args_list[0].args, state.mark_account_fail.call_args_list[0].kwargs
+        self.assertEqual(str(first_mark_args[0]), "not_logged_in")
+        self.assertEqual(first_mark_kwargs, {"mark_invalid": True, "disable": True})
+        second_mark_args, second_mark_kwargs = state.mark_account_fail.call_args_list[1].args, state.mark_account_fail.call_args_list[1].kwargs
+        self.assertEqual(str(second_mark_args[0]), "challenge still present after solve")
+        self.assertEqual(second_mark_kwargs, {"mark_invalid": False, "disable": False})
         serve_fn.assert_called_once_with(
             host="127.0.0.1",
             port=8080,
@@ -1111,9 +1163,10 @@ class CliRuntimeTests(unittest.TestCase):
             api_key="",
             action_timeout_secs=60,
             on_action_success=serve_kwargs["on_action_success"],
+            auth_cookie_updater=serve_kwargs["auth_cookie_updater"],
         )
 
-    def test_handle_authenticated_serve_returns_nonzero_on_auth_fatal(self) -> None:
+    def test_handle_authenticated_serve_allows_auth_fatal_without_nonzero_exit(self) -> None:
         state = Mock()
         services = types.SimpleNamespace(client=object(), base_client=object(), store=object(), plugin_manager=None)
         args = types.SimpleNamespace(command="serve", host=None, port=None)
@@ -1130,10 +1183,10 @@ class CliRuntimeTests(unittest.TestCase):
             with patch("discorsair.runtime.commands.serve.serve"):
                 outcome = handle_authenticated_command(args, context)
 
-        self.assertEqual(outcome.exit_code, 1)
+        self.assertEqual(outcome.exit_code, 0)
         state.mark_account_fail.assert_not_called()
 
-    def test_handle_authenticated_serve_marks_fail_on_unresolved_challenge_fatal(self) -> None:
+    def test_handle_authenticated_serve_allows_unresolved_challenge_without_nonzero_exit(self) -> None:
         state = Mock()
         services = types.SimpleNamespace(client=object(), base_client=object(), store=object(), plugin_manager=None)
         args = types.SimpleNamespace(command="serve", host=None, port=None)
@@ -1151,8 +1204,8 @@ class CliRuntimeTests(unittest.TestCase):
             with patch("discorsair.runtime.commands.serve.serve"):
                 outcome = handle_authenticated_command(args, context)
 
-        self.assertEqual(outcome.exit_code, 1)
-        state.mark_account_fail.assert_called_once_with(exc, mark_invalid=False, disable=False)
+        self.assertEqual(outcome.exit_code, 0)
+        state.mark_account_fail.assert_not_called()
 
 
 if __name__ == "__main__":

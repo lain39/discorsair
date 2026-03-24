@@ -35,9 +35,10 @@ _MANAGED_AUTH_PATHS: tuple[tuple[str, str], ...] = (
     ("auth", "last_ok"),
     ("auth", "last_fail"),
     ("auth", "last_error"),
-    ("auth", "status"),
     ("auth", "disabled"),
 )
+_REMOVED_RUNTIME_STATE_PATHS: tuple[tuple[str, str], ...] = (("auth", "status"),)
+_MISSING = object()
 
 
 class RuntimeStateStore:
@@ -72,9 +73,6 @@ class RuntimeStateStore:
                 ("auth", "last_fail"),
                 ("auth", "last_error"),
             }
-            if mark_invalid:
-                auth["status"] = "invalid"
-                changed_paths.add(("auth", "status"))
             if disable:
                 auth["disabled"] = True
                 changed_paths.add(("auth", "disabled"))
@@ -87,7 +85,7 @@ class RuntimeStateStore:
         return self.save_cookie_header(client.get_cookie_header())
 
     def save_cookie_header(self, cookie_header: str) -> bool:
-        cookie_header = _persistent_cookie_header(cookie_header)
+        cookie_header = persistent_auth_cookie_header(cookie_header)
         if not cookie_header:
             return False
         with self._lock:
@@ -103,6 +101,47 @@ class RuntimeStateStore:
                 auth["cookie"] = previous_cookie
             else:
                 auth.pop("cookie", None)
+            return False
+
+    def recover_account_with_cookie(self, cookie_header: str) -> bool:
+        cookie_header = persistent_auth_cookie_header(cookie_header)
+        if not cookie_header:
+            return False
+        with self._lock:
+            auth = self._app_config.get("auth", {})
+            previous = {key: auth.get(key, _MISSING) for key in ("cookie", "disabled", "last_error")}
+            auth["cookie"] = cookie_header
+            auth["disabled"] = False
+            auth["last_error"] = ""
+            changed_paths = {
+                ("auth", "cookie"),
+                ("auth", "disabled"),
+                ("auth", "last_error"),
+            }
+            if self._save_runtime_state(changed_paths):
+                return True
+            for key, value in previous.items():
+                if value is _MISSING:
+                    auth.pop(key, None)
+                else:
+                    auth[key] = value
+            return False
+
+    def set_account_disabled(self, disabled: bool) -> bool:
+        with self._lock:
+            auth = self._app_config.get("auth", {})
+            next_value = bool(disabled)
+            if bool(auth.get("disabled", False)) == next_value:
+                return True
+            had_value = "disabled" in auth
+            previous_value = auth.get("disabled")
+            auth["disabled"] = next_value
+            if self._save_runtime_state({("auth", "disabled")}):
+                return True
+            if had_value:
+                auth["disabled"] = previous_value
+            else:
+                auth.pop("disabled", None)
             return False
 
     def _save_runtime_state(self, updated_paths: set[tuple[str, str]]) -> bool:
@@ -137,6 +176,8 @@ class RuntimeStateStore:
         payload = copy.deepcopy(base_payload)
         for path in self._env_override_paths:
             _delete_nested_value(payload, path)
+        for path in _REMOVED_RUNTIME_STATE_PATHS:
+            _delete_nested_value(payload, path)
         paths_to_write = updated_paths
         if initialize_all:
             paths_to_write = set(_MANAGED_AUTH_PATHS)
@@ -150,7 +191,7 @@ class RuntimeStateStore:
         return payload
 
 
-def _persistent_cookie_header(cookie_header: str) -> str:
+def persistent_auth_cookie_header(cookie_header: str) -> str:
     cookies = parse_cookie_header(cookie_header.strip())
     token = cookies.get("_t", "").strip()
     if not token:

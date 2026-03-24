@@ -21,7 +21,6 @@ _ENV_OVERRIDE_PATHS: dict[str, tuple[str, ...]] = {
 }
 _RUNTIME_STATE_AUTH_PATHS: tuple[tuple[str, str], ...] = (
     ("auth", "cookie"),
-    ("auth", "status"),
     ("auth", "disabled"),
     ("auth", "last_ok"),
     ("auth", "last_fail"),
@@ -49,7 +48,6 @@ def default_app_config() -> dict[str, Any]:
             "name": "main",
             "cookie": "",
             "proxy": "",
-            "status": "active",
             "disabled": False,
             "last_ok": "",
             "last_fail": "",
@@ -149,6 +147,9 @@ def merge_app_config_and_runtime_state(app_data: dict[str, Any], state_data: dic
     merged = _merge_dicts(default_app_config(), app_data)
     apply_runtime_state(merged, state_data)
     _apply_env_overrides(merged)
+    auth = merged.get("auth")
+    if isinstance(auth, dict):
+        auth.pop("status", None)
     return merged
 
 
