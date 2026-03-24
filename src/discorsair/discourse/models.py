@@ -1,1 +1,0 @@
-"""Discourse response models (lightweight)."""

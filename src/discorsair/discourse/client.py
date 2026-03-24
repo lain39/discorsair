@@ -1,4 +1,4 @@
-"""High-level Discourse client."""
+"""Discourse API client."""
 
 from __future__ import annotations
 
