@@ -57,6 +57,90 @@ CLI 命令名：`discorsair`
 - `POST /auth/cookie` / `force=true` 的设计目标是“同一账号刷新登录态”，不是“跨账号热切换”；如果要换号，建议重启进程并使用目标账号配置重新启动
 - `queue.maxsize` 只限制 ready/running 的请求；已进入 `429` 冷却等待的 delayed 请求不受这个上限约束
 
+## 容器部署
+
+- 仓库内提供了一个从官方 FlareSolverr 镜像出发的单容器方案：`Dockerfile` + `docker-entrypoint.sh`
+- 容器内会同时启动：
+  - FlareSolverr：`127.0.0.1:8191`
+  - Discorsair `serve`：`0.0.0.0:17880`
+- 只暴露 Discorsair 的 `17880`；FlareSolverr 只供容器内访问
+- 镜像默认不打包你本地的 `config/*.json` / `*.state.json`；需要在运行时挂载或自行派生镜像提供 `config/app.json`
+- 镜像默认使用 SQLite，并把数据目录约定为 `/data`
+
+推荐的容器配置：
+
+```jsonc
+{
+  "storage": {
+    "backend": "sqlite",
+    "path": "/data/discorsair.db",
+    "lock_dir": "/data/locks"
+  },
+  "flaresolverr": {
+    "base_url": "http://127.0.0.1:8191",
+    "in_docker": false
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 17880,
+    "api_key": ""
+  }
+}
+```
+
+建议把敏感值放环境变量：
+
+- `DISCORSAIR_AUTH_COOKIE`
+- `DISCORSAIR_AUTH_KEY`
+- 可选：`DISCORSAIR_CONFIG`
+- 可选：`DISCORSAIR_SERVER_HOST`
+- 可选：`DISCORSAIR_SERVER_PORT`
+- 可选：`FLARESOLVERR_INTERNAL_URL`
+- 可选：`FLARESOLVERR_STARTUP_TIMEOUT_SECS`
+
+最省事的本地启动方式是直接使用仓库内的 `docker-compose.yml`：
+
+```bash
+DISCORSAIR_AUTH_COOKIE='_t=...' \
+DISCORSAIR_AUTH_KEY='replace-me' \
+docker compose up --build
+```
+
+也可以先把它们写进仓库根目录的 `.env` 再执行 `docker compose up --build`；仓库提供了可提交的 `.env.example`，而本地 `.env` 已被 `.gitignore` 忽略。
+
+它会：
+
+- 构建当前仓库镜像
+- 挂载 `./config/app.json` 到容器内
+- 挂载命名卷 `discorsair-data` 到 `/data`
+- 暴露 `17880`
+
+本地构建：
+
+```bash
+docker build -t discorsair-flaresolverr .
+```
+
+运行示例：
+
+```bash
+docker run --rm \
+  -p 17880:17880 \
+  -v "$(pwd)/config/app.json:/app/config/app.json:ro" \
+  -v discorsair-data:/data \
+  -e DISCORSAIR_AUTH_COOKIE='_t=...' \
+  -e DISCORSAIR_AUTH_KEY='replace-me' \
+  discorsair-flaresolverr
+```
+
+说明：
+
+- 如果你传了容器命令参数，入口脚本会先启动 FlareSolverr，再执行你传入的命令
+- 如果不挂载 `/data`，SQLite、lock 目录和运行时状态会随容器销毁一起丢失
+- 如果你想把配置直接烘进镜像，可以基于当前 `Dockerfile` 再写一层派生镜像，把你自己的 `config/app.json` 复制进去
+- `FLARESOLVERR_INTERNAL_URL` 用于告诉入口脚本去哪里探测容器内 FlareSolverr 的就绪状态，默认是 `http://127.0.0.1:8191`
+- `FLARESOLVERR_STARTUP_TIMEOUT_SECS` 控制入口脚本等待 FlareSolverr 启动完成的超时时间，默认 `60`
+
 ## PostgreSQL
 
 - 先安装可选依赖：`uv sync --extra postgres`

@@ -129,8 +129,9 @@
 - `flaresolverr.use_base_url_for_csrf=true` 时，获取 CSRF 会改为用 FlareSolverr 访问 `base_url` 并提取页面里的 `<meta name="csrf-token" ...>`；关闭时仍使用 `/session/csrf`
 - 该路径仍会沿用运行时的 UA 对齐、请求串行化、限流与重试/backoff 逻辑
 - 如果 FlareSolverr 返回了 cookie 但页面里没有可提取的 `csrf-token`，会按登录失效处理
-- `flaresolverr.in_docker=true` 表示 FlareSolverr 运行在 Docker 中；为 `false` 时，传给 FlareSolverr 的代理不会把 `127.0.0.1/localhost` 替换为 `host.docker.internal`
-- 需提前部署 FlareSolverr；如果运行在 Docker 中，`flaresolverr.in_docker` 应保持为 `true`
+- `flaresolverr.in_docker=true` 只表示“当前要传给 FlareSolverr 的代理地址，需要把 `127.0.0.1/localhost` 改写成 FlareSolverr 容器可访问的 `host.docker.internal`”；为 `false` 时不会做这层改写
+- 需提前部署 FlareSolverr；如果是“Discorsair 在宿主机，FlareSolverr 在 Docker 里”或其他跨容器/跨网络场景，且 `auth.proxy` 仍写的是宿主机回环地址，`flaresolverr.in_docker` 才通常应设为 `true`
+- 如果像仓库自带容器方案这样，Discorsair 和 FlareSolverr 跑在同一个容器里，并通过 `http://127.0.0.1:8191` 直连，那么 `flaresolverr.in_docker` 应保持为 `false`
 - 如果 `auth.proxy` 使用回环地址（如 `http://127.0.0.1:7890`）且 `flaresolverr.in_docker=true`，传给 FlareSolverr 的代理会转换为 `http://host.docker.internal:7890`
 - 如果 `auth.proxy` 包含认证信息，配置里应保持 URL 编码形式；`curl_cffi` 直接使用该 URL，FlareSolverr 会改为 `{"url","username","password"}` 结构并对账号密码做 URL 解码后再发送
 - 该转换由 `src/core/` 处理

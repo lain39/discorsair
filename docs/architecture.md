@@ -1,11 +1,5 @@
 # 架构说明
 
-## 目标
-
-- 让 CLI 入口保持轻量
-- 把运行时编排、依赖构造、状态持久化、命令执行分层
-- 避免后续功能继续堆回 `src/discorsair/cli.py`
-
 ## 当前分层
 
 ### 1. CLI 入口
@@ -16,6 +10,10 @@
   - 兼容 `--config` 在子命令后面的写法
   - 处理 `init`
   - 调用 runtime 并渲染 JSON 输出
+- 设计原则
+  - 命令尽量短、语义清晰
+  - 先跑通核心流程，再扩展可选参数
+  - 所有命令默认读取 `config/app.json`
 
 ### 2. Runtime 生命周期
 
@@ -128,12 +126,9 @@ from discorsair.runtime.state import RuntimeStateStore
 
 ## 兼容策略
 
-- 不再新增新的兼容转发文件
-- 旧兼容层在内部引用全部切换完成后，优先删除而不是继续保留
 - 只有 `src/discorsair/runtime/__init__.py` 作为 runtime 子系统的公开 facade 保留
 
-## 后续建议
+## 备注
 
 - 新增 runtime 相关逻辑时，优先放入 `src/discorsair/runtime/`
 - 新命令优先作为 `src/discorsair/runtime/commands/` 下的新模块
-- 如果某层再次变胖，继续按职责拆分，不回退到顶层大文件

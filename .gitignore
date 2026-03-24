@@ -24,6 +24,11 @@ __pycache__/
 # Local config overrides
 config/*.json
 
+# Local environment files
+.env
+.env.*
+!.env.example
+
 # Runtime state
 *.state.json
 .*.state.json.lock

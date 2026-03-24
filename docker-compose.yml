@@ -1,0 +1,19 @@
+services:
+  discorsair:
+    build:
+      context: .
+    image: discorsair-flaresolverr:local
+    container_name: discorsair
+    restart: unless-stopped
+    init: true
+    ports:
+      - "17880:17880"
+    volumes:
+      - ./config/app.json:/app/config/app.json:ro
+      - discorsair-data:/data
+    environment:
+      DISCORSAIR_AUTH_COOKIE: ${DISCORSAIR_AUTH_COOKIE:?set DISCORSAIR_AUTH_COOKIE}
+      DISCORSAIR_AUTH_KEY: ${DISCORSAIR_AUTH_KEY:?set DISCORSAIR_AUTH_KEY}
+
+volumes:
+  discorsair-data:
