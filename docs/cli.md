@@ -301,6 +301,9 @@ discorsair status
   - 插件累计 `once_key` / `mark_done` 标记数
 - `items[*].kv_keys`
   - 插件已写入的 KV key 列表
+- `items[*].hook_timeouts`
+  - 代表宿主侧等待插件 hook 超时的次数
+  - 这是“停止等待”的统计，不代表插件线程一定已经被强制终止
 
 说明：
 

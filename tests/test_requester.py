@@ -351,6 +351,83 @@ class RequesterTests(unittest.TestCase):
         self.assertNotIn("external_cookie", requester._session.cookies)
         self.assertEqual(requester._session.cookies["cf_clearance"], "abc")
 
+    def test_request_persists_sent_t_and_waits_to_validate_new_t(self) -> None:
+        requester = self._build_requester(cookie_header="_t=old-token; cf_clearance=abc")
+        persisted: list[str] = []
+        requester.set_cookie_persist_callback(persisted.append)
+
+        with patch(
+            "discorsair.core.requester.requests.request",
+            return_value=self._json_response(
+                200,
+                cookies={"_t": "new-token", "session": "xyz"},
+            ),
+        ):
+            requester.request("get", "/latest.json", allow_fallback=False)
+
+        self.assertEqual(persisted, [])
+        self.assertEqual(requester.get_cookie_header(), "_t=new-token; cf_clearance=abc; session=xyz")
+        self.assertEqual(requester.get_persist_candidate_cookie_header(), "_t=old-token")
+
+        with patch(
+            "discorsair.core.requester.requests.request",
+            return_value=self._json_response(200),
+        ):
+            requester.request("get", "/latest.json", allow_fallback=False)
+
+        self.assertEqual(persisted, ["_t=new-token"])
+        self.assertEqual(requester.get_persist_candidate_cookie_header(), "_t=new-token")
+
+    def test_flaresolverr_request_persists_sent_t_and_waits_to_validate_new_t(self) -> None:
+        requester = self._build_requester(
+            cookie_header="_t=old-token; cf_clearance=abc",
+            flaresolverr_base_url="http://flaresolverr:8191",
+        )
+        persisted: list[str] = []
+        requester.set_cookie_persist_callback(persisted.append)
+
+        class DummyFsResponse:
+            def json(self) -> dict[str, object]:
+                return {
+                    "status": "ok",
+                    "solution": {
+                        "response": '<html><head><meta name="csrf-token" content="csrf-123"></head></html>',
+                        "cookies": [
+                            {"name": "_t", "value": "new-token"},
+                            {"name": "cf_clearance", "value": "new-clearance"},
+                        ],
+                    },
+                }
+
+        with patch("discorsair.core.requester.requests.post", return_value=DummyFsResponse()):
+            requester._flaresolverr_request("get", "https://forum.example")
+
+        self.assertEqual(persisted, [])
+        self.assertEqual(requester.get_persist_candidate_cookie_header(), "_t=old-token")
+        self.assertEqual(requester.get_cookie_header(), "_t=new-token; cf_clearance=new-clearance")
+
+    def test_request_retries_same_persist_candidate_after_callback_failure(self) -> None:
+        requester = self._build_requester(cookie_header="_t=old-token")
+        callback_results = iter([False, True])
+        persisted: list[str] = []
+
+        def persist_callback(cookie_header: str) -> bool:
+            persisted.append(cookie_header)
+            return next(callback_results)
+
+        requester.set_cookie_persist_callback(persist_callback)
+        requester._session.cookies["_t"] = "new-token"
+
+        with patch(
+            "discorsair.core.requester.requests.request",
+            return_value=self._json_response(200),
+        ):
+            requester.request("get", "/latest.json", allow_fallback=False)
+            requester.request("get", "/latest.json", allow_fallback=False)
+
+        self.assertEqual(persisted, ["_t=new-token", "_t=new-token"])
+        self.assertEqual(requester.get_persist_candidate_cookie_header(), "_t=new-token")
+
     def test_flaresolverr_request_uses_structured_proxy_payload(self) -> None:
         requester = self._build_requester(
             proxy=_FAKE_PROXY_URL,

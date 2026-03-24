@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 import threading
 from urllib.parse import unquote, urlencode, urljoin, urlparse
 import time
@@ -121,6 +121,13 @@ def _header_value(headers: Dict[str, str], name: str) -> str:
         if _normalize_header_key(key) == target:
             return str(value)
     return ""
+
+
+def _persistent_cookie_header_from_cookies(cookies: Dict[str, str]) -> str:
+    token = str(cookies.get("_t", "") or "").strip()
+    if not token:
+        return ""
+    return cookies_to_header({"_t": token})
 
 
 def _is_cloudflare_challenge(status: int, headers: Dict[str, str], text: str) -> bool:
@@ -328,8 +335,10 @@ class Requester:
         self._flaresolverr_in_docker = bool(flaresolverr_in_docker)
         self._lock = threading.Lock()
         self._csrf_token_hint = ""
+        self._cookie_persist_callback: Callable[[str], bool | None] | None = None
         if not self._session.cookies:
             self._session.cookies = parse_cookie_header(self._session.cookie_header)
+        self._persist_candidate_cookie_header = _persistent_cookie_header_from_cookies(self._session.cookies)
 
     def _default_headers(self, *, include_referer: bool = True) -> Dict[str, str]:
         headers: Dict[str, str] = {
@@ -440,6 +449,7 @@ class Requester:
                     _LOG.debug("request cookies: %s", _summarize_cookies(cookies))
                     if params:
                         _LOG.debug("request params: %s", params)
+                sent_auth_cookie = _persistent_cookie_header_from_cookies(cookies)
                 try:
                     response = self._perform_request(
                         method=method,
@@ -466,7 +476,7 @@ class Requester:
                     _LOG.debug("response status: %s", response.status)
                     _LOG.debug("response headers: %s", _redact_headers(response.headers))
                     _LOG.debug("response body (first 500 chars): %s", response.text[:500])
-
+                success_cookie = sent_auth_cookie
                 if allow_fallback and same_origin and _is_cloudflare_challenge(response.status, response.headers, response.text):
                     if not self._flaresolverr_base_url:
                         self._session.last_response_ok = response.status < 400
@@ -475,9 +485,11 @@ class Requester:
                     try:
                         self._solve_challenge()
                         self._apply_csrf_token_hint(req_headers)
+                        retry_cookies = dict(self._session.cookies)
+                        success_cookie = _persistent_cookie_header_from_cookies(retry_cookies)
                         if self._debug:
                             _LOG.debug("retry request headers: %s", _redact_headers(req_headers))
-                            _LOG.debug("retry request cookies: %s", _summarize_cookies(dict(self._session.cookies)))
+                            _LOG.debug("retry request cookies: %s", _summarize_cookies(retry_cookies))
                         response = self._perform_request(
                             method=method,
                             url=url,
@@ -485,7 +497,7 @@ class Requester:
                             params=params,
                             data=data,
                             json_body=json_body,
-                            cookies=dict(self._session.cookies),
+                            cookies=retry_cookies,
                             proxies=proxies,
                             impersonate_target=self._session.impersonate_target,
                             persist_response_cookies=True,
@@ -560,6 +572,8 @@ class Requester:
                     continue
                 challenge_still_present_count = 0
                 self._session.last_response_ok = response.status < 400
+                if self._session.last_response_ok and same_origin:
+                    self._mark_persist_candidate(success_cookie)
                 return response
 
             if response is None:
@@ -615,6 +629,12 @@ class Requester:
 
     def get_cookie_header(self) -> str:
         return cookies_to_header(self._session.cookies)
+
+    def get_persist_candidate_cookie_header(self) -> str:
+        return self._persist_candidate_cookie_header
+
+    def set_cookie_persist_callback(self, callback: Callable[[str], bool | None] | None) -> None:
+        self._cookie_persist_callback = callback
 
     def get_csrf_token_hint(self) -> str:
         return self._csrf_token_hint
@@ -744,7 +764,11 @@ class Requester:
             # If that real page still has no csrf meta but does set cookies, treat it as a
             # logged-out/invalid-account page instead of another unresolved CF challenge.
             raise _build_login_invalid_error("not_logged_in")
+        sent_auth_cookie = ""
+        if include_cookies:
+            sent_auth_cookie = _persistent_cookie_header_from_cookies(self._session.cookies)
         if not persist_solution_cookies:
+            self._mark_persist_candidate(sent_auth_cookie)
             return solution
         merged = dict(self._session.cookies)
         for item in cookies_list:
@@ -755,6 +779,7 @@ class Requester:
                 if name == "cf_clearance":
                     self._session.cf_clearance_cache[_proxy_key(self._session.proxy)] = value
         self._session.cookies = merged
+        self._mark_persist_candidate(sent_auth_cookie)
         return solution
 
     def _solve_challenge(self) -> None:
@@ -773,6 +798,22 @@ class Requester:
                 headers[key] = self._csrf_token_hint
                 _LOG.info("request: updated x-csrf-token from FlareSolverr solution")
                 return
+
+    def _mark_persist_candidate(self, cookie_header: str) -> None:
+        candidate = str(cookie_header or "").strip()
+        if not candidate or candidate == self._persist_candidate_cookie_header:
+            return
+        callback = self._cookie_persist_callback
+        if callback is not None:
+            try:
+                callback_result = callback(candidate)
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning("request: failed to persist auth cookie candidate: %s", exc)
+                return
+            if callback_result is False:
+                _LOG.warning("request: auth cookie candidate persistence callback reported failure")
+                return
+        self._persist_candidate_cookie_header = candidate
 
     def _clear_non_auth_cookies_after_unresolved_challenge(self) -> None:
         retained: Dict[str, str] = {}

@@ -80,20 +80,32 @@ class RuntimeStateStore:
                 changed_paths.add(("auth", "disabled"))
             self._save_runtime_state(changed_paths)
 
-    def save_cookies(self, client: DiscourseClient) -> None:
-        if client.last_response_ok() is not True:
-            return
-        cookie_header = _persistent_cookie_header(client.get_cookie_header())
+    def save_cookies(self, client: DiscourseClient) -> bool:
+        candidate_getter = getattr(client, "get_persist_candidate_cookie_header", None)
+        if callable(candidate_getter):
+            return self.save_cookie_header(str(candidate_getter() or ""))
+        return self.save_cookie_header(client.get_cookie_header())
+
+    def save_cookie_header(self, cookie_header: str) -> bool:
+        cookie_header = _persistent_cookie_header(cookie_header)
         if not cookie_header:
-            return
+            return False
         with self._lock:
             auth = self._app_config.get("auth", {})
             if auth.get("cookie") == cookie_header:
-                return
+                return True
+            had_cookie = "cookie" in auth
+            previous_cookie = auth.get("cookie")
             auth["cookie"] = cookie_header
-            self._save_runtime_state({("auth", "cookie")})
+            if self._save_runtime_state({("auth", "cookie")}):
+                return True
+            if had_cookie:
+                auth["cookie"] = previous_cookie
+            else:
+                auth.pop("cookie", None)
+            return False
 
-    def _save_runtime_state(self, updated_paths: set[tuple[str, str]]) -> None:
+    def _save_runtime_state(self, updated_paths: set[tuple[str, str]]) -> bool:
         state_path = self._state_path
         try:
             path = Path(state_path)
@@ -102,8 +114,10 @@ class RuntimeStateStore:
                     base_payload, initialize_all = self._load_runtime_state_base(path)
                     payload = self._build_runtime_state_payload(base_payload, updated_paths, initialize_all=initialize_all)
                     _write_json_atomically(path, payload)
+            return True
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning("failed to save runtime state: %s", exc)
+            return False
 
     def _load_runtime_state_base(self, state_path: Path) -> tuple[dict[str, Any], bool]:
         try:

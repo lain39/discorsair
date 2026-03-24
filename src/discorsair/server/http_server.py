@@ -392,6 +392,18 @@ class WatchController:
         if self._on_stop:
             self._on_stop()
 
+    def wait_until_stopped(self, timeout_secs: float | None = None) -> bool:
+        thread = self._runtime.thread
+        if thread is None:
+            return True
+        if not thread.is_alive():
+            return True
+        if thread is threading.current_thread():
+            return False
+        wait_timeout = self._stop_wait_timeout_secs() if timeout_secs is None else max(float(timeout_secs), 0.0)
+        thread.join(timeout=wait_timeout)
+        return not thread.is_alive()
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

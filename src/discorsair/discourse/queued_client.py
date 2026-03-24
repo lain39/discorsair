@@ -100,5 +100,11 @@ class QueuedDiscourseClient:
     def get_cookie_header(self) -> str:
         return self._inner.get_cookie_header()
 
+    def get_persist_candidate_cookie_header(self) -> str:
+        getter = getattr(self._inner, "get_persist_candidate_cookie_header", None)
+        if callable(getter):
+            return str(getter() or "")
+        return self.get_cookie_header()
+
     def last_response_ok(self) -> bool | None:
         return self._inner.last_response_ok()

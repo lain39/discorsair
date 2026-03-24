@@ -42,15 +42,21 @@ from discorsair.utils.jsonc import loads as jsonc_loads
 
 
 class _Client:
-    def __init__(self, *, ok: bool | None, cookie: str) -> None:
+    def __init__(self, *, ok: bool | None, cookie: str, candidate_cookie: str | None = None) -> None:
         self._ok = ok
         self._cookie = cookie
+        self._candidate_cookie = candidate_cookie
 
     def last_response_ok(self) -> bool | None:
         return self._ok
 
     def get_cookie_header(self) -> str:
         return self._cookie
+
+    def get_persist_candidate_cookie_header(self) -> str:
+        if self._candidate_cookie is None:
+            return self._cookie
+        return self._candidate_cookie
 
 
 class CliRuntimeTests(unittest.TestCase):
@@ -91,7 +97,7 @@ class CliRuntimeTests(unittest.TestCase):
             ),
         )
 
-    def test_state_store_saves_cookie_only_for_successful_response(self) -> None:
+    def test_state_store_saves_cookie_when_new_t_is_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "app.json"
             state_path = self._state_path(config_path)
@@ -104,7 +110,7 @@ class CliRuntimeTests(unittest.TestCase):
             self.assertEqual(config["auth"]["cookie"], "old")
             self.assertFalse(state_path.exists())
 
-            state.save_cookies(_Client(ok=True, cookie="_t=new-token; cf_clearance=abc; session=xyz"))
+            state.save_cookies(_Client(ok=False, cookie="_t=new-token; cf_clearance=abc; session=xyz"))
 
             self.assertEqual(config["auth"]["cookie"], "_t=new-token")
             saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -128,6 +134,42 @@ class CliRuntimeTests(unittest.TestCase):
             state.save_cookies(_Client(ok=True, cookie="_t=old-cookie; cf_clearance=abc"))
             self.assertEqual(config["auth"]["cookie"], "_t=old-cookie")
             self.assertFalse(state_path.exists())
+
+    def test_state_store_prefers_persist_candidate_cookie_over_current_runtime_cookie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "app.json"
+            state_path = self._state_path(config_path)
+            config = {"_path": str(config_path), "auth": {"cookie": "_t=old-cookie"}}
+            state = RuntimeStateStore(config)
+
+            state.save_cookies(
+                _Client(
+                    ok=True,
+                    cookie="_t=new-runtime-token; cf_clearance=abc",
+                    candidate_cookie="_t=validated-token",
+                )
+            )
+
+            self.assertEqual(config["auth"]["cookie"], "_t=validated-token")
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["auth"]["cookie"], "_t=validated-token")
+
+    def test_state_store_retries_same_cookie_after_previous_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "app.json"
+            state_path = self._state_path(config_path)
+            config = {"_path": str(config_path), "auth": {"cookie": "_t=old-cookie"}}
+            state = RuntimeStateStore(config)
+
+            with patch.object(state, "_save_runtime_state", side_effect=[False, True]) as save_state:
+                state.save_cookie_header("_t=new-cookie")
+                self.assertEqual(config["auth"]["cookie"], "_t=old-cookie")
+                self.assertFalse(state_path.exists())
+
+                state.save_cookie_header("_t=new-cookie")
+
+            self.assertEqual(save_state.call_count, 2)
+            self.assertEqual(config["auth"]["cookie"], "_t=new-cookie")
 
     def test_state_store_does_not_persist_env_overridden_sensitive_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1055,6 +1097,7 @@ class CliRuntimeTests(unittest.TestCase):
         self.assertEqual(state.mark_account_ok.call_count, 1)
         self.assertEqual(state.mark_account_fail.call_count, 1)
         self.assertEqual(state.save_cookies.call_count, 2)
+        controller.wait_until_stopped.assert_called_once_with()
         self.assertEqual(state.save_cookies.call_args_list[0].args, (services.base_client,))
         self.assertEqual(state.save_cookies.call_args_list[1].args, (services.base_client,))
         mark_args, mark_kwargs = state.mark_account_fail.call_args

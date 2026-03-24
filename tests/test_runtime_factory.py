@@ -21,7 +21,69 @@ sys.modules.setdefault("curl_cffi.requests.exceptions", fake_requests_exceptions
 
 from discorsair.runtime.factory import build_client, build_notifier, build_services, load_runtime_app_config, load_settings, open_store, resolve_storage_path
 from discorsair.runtime.settings import RuntimeSettings, ServerSettings, StoreSettings, WatchSettings
+from discorsair.storage.postgres_store import PostgresStore
 from discorsair.utils.config import derive_runtime_state_path
+
+
+class _FakePostgresCursor:
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def execute(self, sql: str, params=()) -> None:
+        self._conn.execute_calls.append((sql, params))
+        if self._conn.aborted:
+            raise RuntimeError("current transaction is aborted")
+        if self._conn.fail_next_execute:
+            self._conn.fail_next_execute = False
+            self._conn.aborted = True
+            raise RuntimeError("boom")
+
+    def executemany(self, sql: str, params) -> None:
+        self._conn.execute_calls.append((sql, params))
+        if self._conn.aborted:
+            raise RuntimeError("current transaction is aborted")
+        if self._conn.fail_next_execute:
+            self._conn.fail_next_execute = False
+            self._conn.aborted = True
+            raise RuntimeError("boom")
+
+    def fetchone(self):
+        return self._conn.fetchone_result
+
+    def fetchall(self):
+        return list(self._conn.fetchall_result)
+
+
+class _FakePostgresConn:
+    def __init__(self, *, fetchone_result=None, fetchall_result=None) -> None:
+        self.fetchone_result = fetchone_result
+        self.fetchall_result = fetchall_result or []
+        self.fail_next_execute = False
+        self.aborted = False
+        self.read_only = False
+        self.execute_calls: list[tuple[object, object]] = []
+        self.commit_calls = 0
+        self.rollback_calls = 0
+        self.closed = False
+
+    def cursor(self):
+        return _FakePostgresCursor(self)
+
+    def commit(self) -> None:
+        self.commit_calls += 1
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+        self.aborted = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class RuntimeFactoryTests(unittest.TestCase):
@@ -729,6 +791,62 @@ class RuntimeFactoryTests(unittest.TestCase):
             ensure_metadata=False,
             read_only=True,
         )
+
+    def test_postgres_store_rolls_back_failed_query_before_reuse(self) -> None:
+        store = object.__new__(PostgresStore)
+        store._conn = _FakePostgresConn(fetchone_result=(1, 2, 3, 4))
+        store._site_key = "forum.example"
+        store._account_name = "main"
+        store._conn.fail_next_execute = True
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            store.get_stats_total()
+
+        self.assertEqual(store._conn.rollback_calls, 1)
+        self.assertEqual(
+            store.get_stats_total(),
+            {
+                "topics_seen": 1,
+                "posts_fetched": 2,
+                "timings_sent": 3,
+                "notifications_sent": 4,
+            },
+        )
+
+    def test_postgres_store_rolls_back_failed_write_before_reuse(self) -> None:
+        store = object.__new__(PostgresStore)
+        store._conn = _FakePostgresConn()
+        store._conn.fail_next_execute = True
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            store._execute("UPDATE stats_total SET topics_seen = topics_seen + %s", (1,))
+
+        self.assertEqual(store._conn.rollback_calls, 1)
+        store._execute("UPDATE stats_total SET topics_seen = topics_seen + %s", (1,))
+        self.assertEqual(store._conn.commit_calls, 1)
+
+    def test_postgres_store_sets_session_read_only_when_requested(self) -> None:
+        conn = _FakePostgresConn()
+        fake_psycopg = types.SimpleNamespace(connect=lambda dsn: conn)
+
+        with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+            with patch("discorsair.storage.postgres_store.postgres_schema_exists", return_value=True):
+                with patch("discorsair.storage.postgres_store.assert_postgres_schema"):
+                    store = PostgresStore(
+                        "postgresql://user:pass@localhost:5432/discorsair",
+                        site_key="forum.example",
+                        account_name="main",
+                        base_url="https://forum.example",
+                        timezone_name="UTC",
+                        initialize=False,
+                        ensure_metadata=False,
+                        read_only=True,
+                    )
+
+        try:
+            self.assertTrue(conn.read_only)
+        finally:
+            store.close()
 
     def test_build_client_treats_missing_impersonate_target_as_empty(self) -> None:
         app_config = {

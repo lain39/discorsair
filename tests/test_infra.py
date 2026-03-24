@@ -330,6 +330,24 @@ class RequestQueueTests(unittest.TestCase):
         self.assertEqual(result_holder, [{"post_id": 7, "emoji": "heart"}])
         queue.stop()
 
+    def test_queued_client_exposes_persist_candidate_cookie_header(self) -> None:
+        queue = RequestQueue()
+
+        class _Inner:
+            def get_cookie_header(self) -> str:
+                return "_t=runtime-cookie"
+
+            def get_persist_candidate_cookie_header(self) -> str:
+                return "_t=validated-cookie"
+
+            def last_response_ok(self) -> bool | None:
+                return True
+
+        client = QueuedDiscourseClient(_Inner(), queue)
+
+        self.assertEqual(client.get_persist_candidate_cookie_header(), "_t=validated-cookie")
+        queue.stop()
+
     def test_cancelled_delayed_task_does_not_keep_queue_full(self) -> None:
         queue = RequestQueue(maxsize=1)
         delayed = queue.submit(lambda: "late", not_before=time.monotonic() + 0.3)

@@ -56,6 +56,7 @@ def handle_serve_command(args: argparse.Namespace, context: RuntimeCommandContex
         action_timeout_secs=server.action_timeout_secs,
         on_action_success=_on_action_success,
     )
+    controller.wait_until_stopped()
     fatal_error = controller.fatal_error()
     if fatal_error is not None:
         if not isinstance(fatal_error, DiscourseAuthError):

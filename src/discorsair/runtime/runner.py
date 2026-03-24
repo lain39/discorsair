@@ -50,6 +50,7 @@ class DiscorsairRuntime:
                 with_crawl_resources=args.command in {"run", "watch", "serve"},
                 with_plugins=args.command in {"run", "watch", "serve"},
             )
+            services.base_client.set_cookie_persist_callback(self._state.save_cookie_header)
             return handle_authenticated_command(
                 args,
                 RuntimeCommandContext(

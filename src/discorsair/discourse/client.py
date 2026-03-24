@@ -230,6 +230,17 @@ class DiscourseClient:
     def get_cookie_header(self) -> str:
         return self._requester.get_cookie_header()
 
+    def get_persist_candidate_cookie_header(self) -> str:
+        getter = getattr(self._requester, "get_persist_candidate_cookie_header", None)
+        if callable(getter):
+            return str(getter() or "")
+        return self.get_cookie_header()
+
+    def set_cookie_persist_callback(self, callback) -> None:
+        setter = getattr(self._requester, "set_cookie_persist_callback", None)
+        if callable(setter):
+            setter(callback)
+
     def last_response_ok(self) -> bool | None:
         return self._requester.last_response_ok()
 

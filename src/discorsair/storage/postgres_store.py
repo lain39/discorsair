@@ -363,6 +363,7 @@ class PostgresStore:
         self._site_key = str(site_key or "").strip()
         self._account_name = str(account_name or "").strip()
         self._base_url = str(base_url or "").rstrip("/")
+        self._read_only = bool(read_only)
         if not self._dsn:
             raise ValueError("postgres dsn is required")
         if not self._site_key:
@@ -374,6 +375,8 @@ class PostgresStore:
         except Exception:
             self._tz = ZoneInfo("UTC")
         self._conn = psycopg.connect(self._dsn)
+        if self._read_only:
+            self._set_connection_read_only(True)
         logging.getLogger(__name__).info(
             "postgres: open %s site=%s account=%s",
             _redact_dsn(self._dsn),
@@ -382,13 +385,13 @@ class PostgresStore:
         )
         if initialize:
             self._init_schema()
-            assert_postgres_schema(self._conn)
+            self._assert_schema()
             if ensure_metadata:
                 self._upsert_metadata_rows()
         elif read_only:
-            if not postgres_schema_exists(self._conn):
+            if not self._schema_exists():
                 raise ValueError("postgres schema not initialized")
-            assert_postgres_schema(self._conn)
+            self._assert_schema()
 
     def _today(self) -> str:
         return datetime.now(self._tz).strftime("%Y-%m-%d")
@@ -411,27 +414,73 @@ class PostgresStore:
         return "postgres"
 
     def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-        with self._conn.cursor() as cur:
-            cur.execute(sql, params)
-        self._conn.commit()
+        self._run_transaction(lambda cur: cur.execute(sql, params))
 
     def _fetchone(self, sql: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...] | None:
-        with self._conn.cursor() as cur:
+        def _query(cur):
             cur.execute(sql, params)
             return cur.fetchone()
 
+        return self._run_query(_query)
+
     def _fetchall(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
-        with self._conn.cursor() as cur:
+        def _query(cur):
             cur.execute(sql, params)
             return list(cur.fetchall())
 
+        return self._run_query(_query)
+
+    def _run_query(self, fn):
+        try:
+            with self._conn.cursor() as cur:
+                return fn(cur)
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _run_transaction(self, fn):
+        try:
+            with self._conn.cursor() as cur:
+                result = fn(cur)
+            self._conn.commit()
+            return result
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _schema_exists(self) -> bool:
+        try:
+            return postgres_schema_exists(self._conn)
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _assert_schema(self) -> None:
+        try:
+            assert_postgres_schema(self._conn)
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def _set_connection_read_only(self, enabled: bool) -> None:
+        try:
+            self._conn.read_only = bool(enabled)
+            return
+        except Exception:
+            statement = "SET default_transaction_read_only = on" if enabled else "SET default_transaction_read_only = off"
+            self._execute(statement)
+
     def _init_schema(self) -> None:
-        initialize_postgres_schema(self._conn)
-        self._conn.commit()
+        try:
+            initialize_postgres_schema(self._conn)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def _upsert_metadata_rows(self) -> None:
         now = self._now_iso()
-        with self._conn.cursor() as cur:
+        def _write(cur) -> None:
             cur.execute(
                 """
                 INSERT INTO sites (site_key, base_url, created_at, updated_at)
@@ -451,7 +500,8 @@ class PostgresStore:
                 """,
                 (self._site_key, self._account_name, now, now),
             )
-        self._conn.commit()
+
+        self._run_transaction(_write)
 
     def _sanitize_topic_raw_json(self, topic: dict[str, Any]) -> str:
         raw = copy.deepcopy(topic)
@@ -494,7 +544,7 @@ class PostgresStore:
         existing_snapshot_key = self._existing_topic_snapshot_key(topic_id)
         new_snapshot_key = (first_post_updated_at, title, category_id, tags_json)
         raw_json = self._sanitize_topic_raw_json(topic)
-        with self._conn.cursor() as cur:
+        def _write(cur) -> None:
             cur.execute(
                 """
                 INSERT INTO topics (
@@ -553,7 +603,8 @@ class PostgresStore:
                     """,
                     (self._site_key, topic_id, now, first_post_updated_at, title, category_id, tags_json, raw_json),
                 )
-        self._conn.commit()
+
+        self._run_transaction(_write)
 
     def get_existing_post_ids(self, topic_id: int, post_ids: Iterable[int]) -> set[int]:
         ids = list(post_ids)
@@ -596,7 +647,7 @@ class PostgresStore:
             )
         if not rows:
             return
-        with self._conn.cursor() as cur:
+        def _write(cur) -> None:
             cur.executemany(
                 """
                 INSERT INTO posts (
@@ -624,7 +675,8 @@ class PostgresStore:
                 """,
                 rows,
             )
-        self._conn.commit()
+
+        self._run_transaction(_write)
 
     def upsert_topic_crawl_state(self, topic_id: int, last_synced_post_number: int, last_stream_len: int) -> None:
         self._execute(
@@ -745,7 +797,7 @@ class PostgresStore:
             rows.append((self._site_key, self._account_name, notification_id, str(item.get("created_at", "") or "")))
         if not rows:
             return
-        with self._conn.cursor() as cur:
+        def _write(cur) -> None:
             cur.executemany(
                 """
                 INSERT INTO notification_dedupe (site_key, account_name, notification_id, created_at)
@@ -754,13 +806,14 @@ class PostgresStore:
                 """,
                 rows,
             )
-        self._conn.commit()
+
+        self._run_transaction(_write)
 
     def inc_stat(self, field: str, delta: int = 1) -> None:
         if field not in {"topics_seen", "posts_fetched", "timings_sent", "notifications_sent"}:
             return
         day = self._today()
-        with self._conn.cursor() as cur:
+        def _write(cur) -> None:
             cur.execute(
                 """
                 INSERT INTO stats_total (site_key, account_name)
@@ -793,7 +846,8 @@ class PostgresStore:
                 """,
                 (int(delta), self._site_key, self._account_name, day),
             )
-        self._conn.commit()
+
+        self._run_transaction(_write)
 
     def get_stats_total(self) -> dict[str, int]:
         row = self._fetchone(

@@ -132,7 +132,10 @@
 - 过盾时也会使用 FlareSolverr 访问 `base_url`；如果返回 HTML 含 `<meta name="csrf-token" ...>`，运行时会提取该 token，并用于本次重试及后续请求的 CSRF 同步
 - `cf_clearance` 可按代理 IP 做本地缓存，下次同 IP 先尝试复用
 - 如果过盾后重试仍然命中 `challenge still present after solve`，运行时会清理当前站点 cookie，只保留 `_t`，并丢弃当前代理的 `cf_clearance` 缓存，再按现有重试策略继续
-- 运行时仅在成功请求后才会把最新 `_t` 写回对应 `*.state.json` 里的 `auth.cookie`；其他 cookie 不会持久化，空 `_t` 或未变化的值也不会覆盖状态文件
+- 运行时只会把 `_t` 写回对应 `*.state.json` 里的 `auth.cookie`；其他 cookie 不会持久化
+- 持久化的不是“刚从响应里拿到的新 `_t`”，而是“已经被一次成功交互实际带到服务器的 `_t`”
+- 如果某次成功交互返回了新的 `_t`，这个新 `_t` 会先留在内存，等后续某次成功交互真正带着它发出后，才会成为新的持久化候选
+- `429` / `5xx` 这类重试或失败响应不会推进 `_t` 持久化候选；空 `_t` 或未变化的值也不会覆盖状态文件
 
 ## CLI
 

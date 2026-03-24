@@ -166,6 +166,9 @@ def create_plugin():
 - `plugins.hook_timeout_secs`
   - 默认 hook 超时秒数
   - `0` 表示不设超时
+  - 这是宿主侧的等待上限，不是对插件代码的强制终止
+  - 超时后 Discorsair 会把这次 hook 记为 timeout，并停止等待结果；但 Python 线程本身不会被安全杀掉
+  - 因此如果插件没有主动检查取消状态，或已经进入不可中断的阻塞调用，超时后的插件逻辑仍可能继续运行一段时间
 - `plugins.max_consecutive_failures`
   - 默认连续失败熔断阈值
   - `0` 表示不自动禁用
@@ -605,6 +608,11 @@ class Plugin:
   - 来自正在运行的 watch 进程
   - `runtime_live == true`
   - 可以看到实时内存态，例如连续失败次数、hook 成功/失败次数、最后错误等
+
+注意：
+
+- `hook_timeouts` 表示宿主侧曾经等待超时，不等同于“插件线程已经被强制终止”
+- 当前插件超时采用 cooperative cancellation 模型；如果插件忽略取消状态，超时后的后台线程仍可能继续跑到自己的代码自然结束
 
 插件日志建议统一使用：
 
