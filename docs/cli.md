@@ -146,6 +146,7 @@ discorsair serve --host 0.0.0.0 --port 17880
 
 可用接口：
 
+- `GET /healthz`（公开轻量状态；返回 `{"ok": true}`）
 - `POST /watch/start`（请求体可选：`{"use_schedule": true|false, "force": true|false}`；blocked 时返回失败原因；`force=true` 可强制重试）
 - `POST /watch/config`（请求体：`{"use_unseen": true|false, "timings_per_topic": 30, "max_posts_per_interval": 200}`）
 - `POST /watch/stop`（返回：`{"ok": true|false, "already_stopped": true|false}`）
@@ -157,6 +158,7 @@ discorsair serve --host 0.0.0.0 --port 17880
 
 鉴权：
 
+- `GET /healthz` 永远不要求 `X-API-Key`
 - 如果配置了 `server.api_key`，请求需带 `X-API-Key: <key>` 头
 - 默认监听地址建议保持 `127.0.0.1`
 - 如果改成 `0.0.0.0` 或其他非回环地址，必须配置 `server.api_key`

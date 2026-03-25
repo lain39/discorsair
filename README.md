@@ -61,6 +61,7 @@ CLI 命令名：`discorsair`
 - `serve` 模式下如果遇到登录失效或 unresolved challenge，会停止 watch 并把 watch 标记为 blocked；HTTP 服务继续存活
 - watch 被 `auth_invalid` / `unresolved_challenge` 阻塞后，可用 HTTP `POST /auth/cookie` 更新 `_t`，再用 `POST /watch/start` 恢复，或直接 `POST /watch/start {"force": true}` 强制重试
 - `POST /auth/cookie` / `force=true` 的设计目标是“同一账号刷新登录态”，不是“跨账号热切换”；如果要换号，建议重启进程并使用目标账号配置重新启动
+- HTTP `GET /healthz` 是公开的轻量状态端点，不受 `server.api_key` 保护；返回 `{"ok":true}`，适合做容器保活和外部探活
 - `queue.maxsize` 只限制 ready/running 的请求；已进入 `429` 冷却等待的 delayed 请求不受这个上限约束
 
 ## 容器部署
@@ -186,7 +187,7 @@ docker run --rm \
 - 单独跑静态检查：`make lint`、`make static`
 - 单独跑测试：`make test`
 - 构建与包元数据校验：`make build`
-- 发布前约束校验：`make release-check TAG=v0.1.1`
+- 发布前约束校验：`make release-check TAG=v0.1.2`
 - CI 会执行：release guard、`ruff check`、`compileall`、单元测试、构建、`twine check`
 - `plugins/` 默认忽略本地自用插件，只保留 `plugins/sample_forum_ops/` 示例插件；如果你要提交自用插件，需要手动 `git add -f`
 - 如果要使用 PostgreSQL 后端，先安装可选依赖：`uv sync --extra postgres`

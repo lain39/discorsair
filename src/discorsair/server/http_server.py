@@ -518,6 +518,9 @@ def _parse_schedule_window(window: str) -> tuple[int, int, int, int] | None:
 class ControlHandler(BaseHTTPRequestHandler):
     server: "ControlServer"  # type: ignore[override]
 
+    def _public_status(self) -> dict[str, Any]:
+        return {"ok": True}
+
     def _auth_ok(self) -> bool:
         api_key = self.server.api_key or ""
         if not api_key:
@@ -554,6 +557,9 @@ class ControlHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         try:
+            if self.path == "/healthz":
+                self._send(200, self._public_status())
+                return
             if not self._require_auth():
                 return
             if self.path == "/watch/status":

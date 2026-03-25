@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -118,6 +119,41 @@ class _Store:
 
     def get_stats_today(self) -> dict[str, int]:
         return {"topics_seen": 0, "posts_fetched": 0, "timings_sent": 0, "notifications_sent": 0}
+
+
+class _PluginRecorder:
+    def __init__(self, events: list[tuple[str, int | None]]) -> None:
+        self.events = events
+
+    def has_plugins(self) -> bool:
+        return True
+
+    def new_cycle(self):
+        return types.SimpleNamespace(cycle_id="cycle-1")
+
+    def dispatch(self, hook: str, cycle_state=None, **payload) -> None:
+        post = payload.get("post") or {}
+        self.events.append((hook, int(post.get("id", 0) or 0) or None))
+
+    def sort_topics(self, topics, cycle_state=None):
+        return list(topics)
+
+    def is_topic_skipped(self, cycle_state, topic_id: int) -> bool:
+        return False
+
+
+class _OrderedStore(_Store):
+    def __init__(self, timeline: list[str]) -> None:
+        super().__init__()
+        self.timeline = timeline
+
+    def upsert_topic_detail(self, topic_summary: dict, topic: dict) -> None:
+        self.timeline.append("upsert_topic_detail")
+        super().upsert_topic_detail(topic_summary, topic)
+
+    def insert_posts(self, topic_id: int, posts) -> None:
+        self.timeline.append("insert_posts")
+        super().insert_posts(topic_id, posts)
 
 
 class FlowTests(unittest.TestCase):
@@ -264,6 +300,161 @@ class FlowTests(unittest.TestCase):
         )
 
         self.assertEqual([post["id"] for post in result.content_posts], [502, 503, 504, 505])
+
+    def test_touch_topic_dispatches_after_enter_before_timings(self) -> None:
+        timeline: list[str] = []
+        plugin_events: list[tuple[str, int | None]] = []
+
+        class _OrderedClient(_Client):
+            def get_topic(self, topic_id: int, track_visit: bool = True, force_load: bool = True):
+                timeline.append("get_topic")
+                return super().get_topic(topic_id, track_visit=track_visit, force_load=force_load)
+
+            def post_timings(self, topic_id: int, timings: dict[int, int], topic_time: int) -> None:
+                timeline.append("post_timings")
+                super().post_timings(topic_id, timings, topic_time)
+
+        class _OrderedPluginRecorder(_PluginRecorder):
+            def dispatch(self, hook: str, cycle_state=None, **payload) -> None:
+                timeline.append(hook)
+                super().dispatch(hook, cycle_state=cycle_state, **payload)
+
+        _touch_topic(
+            _OrderedClient(),
+            store=None,
+            topic_summary={"id": 123, "title": "hello", "last_read_post_number": 0, "unseen": True},
+            topic_id=123,
+            remaining_posts=10,
+            crawl_enabled=False,
+            timings_per_topic=1,
+            plugin_manager=_OrderedPluginRecorder(plugin_events),
+            cycle_state=types.SimpleNamespace(cycle_id="cycle-1"),
+        )
+
+        self.assertEqual(timeline[:3], ["get_topic", "topic.after_enter", "post.fetched"])
+        self.assertLess(timeline.index("topic.after_enter"), timeline.index("post_timings"))
+        self.assertLess(timeline.index("post.fetched"), timeline.index("post_timings"))
+        self.assertEqual(plugin_events, [("topic.after_enter", None), ("post.fetched", 501)])
+
+    def test_touch_topic_persists_first_screen_posts_before_dispatching_hooks(self) -> None:
+        timeline: list[str] = []
+
+        class _OrderedClient(_Client):
+            def post_timings(self, topic_id: int, timings: dict[int, int], topic_time: int) -> None:
+                timeline.append("post_timings")
+                super().post_timings(topic_id, timings, topic_time)
+
+        class _OrderedPluginRecorder(_PluginRecorder):
+            def dispatch(self, hook: str, cycle_state=None, **payload) -> None:
+                timeline.append(hook)
+                super().dispatch(hook, cycle_state=cycle_state, **payload)
+
+        _touch_topic(
+            _OrderedClient(),
+            store=_OrderedStore(timeline),
+            topic_summary={"id": 123, "title": "hello", "last_read_post_number": 0, "unseen": True},
+            topic_id=123,
+            remaining_posts=10,
+            crawl_enabled=True,
+            timings_per_topic=1,
+            plugin_manager=_OrderedPluginRecorder([]),
+            cycle_state=types.SimpleNamespace(cycle_id="cycle-1"),
+        )
+
+        self.assertLess(timeline.index("upsert_topic_detail"), timeline.index("topic.after_enter"))
+        self.assertLess(timeline.index("insert_posts"), timeline.index("post.fetched"))
+        self.assertLess(timeline.index("post.fetched"), timeline.index("post_timings"))
+
+    def test_touch_topic_does_not_dispatch_hooks_after_stop_requested(self) -> None:
+        events: list[tuple[str, int | None]] = []
+        stop_event = threading.Event()
+
+        class _StoppingClient(_Client):
+            def get_topic(self, topic_id: int, track_visit: bool = True, force_load: bool = True):
+                topic = super().get_topic(topic_id, track_visit=track_visit, force_load=force_load)
+                stop_event.set()
+                return topic
+
+        _touch_topic(
+            _StoppingClient(),
+            store=None,
+            topic_summary={"id": 123, "title": "hello", "last_read_post_number": 0, "unseen": True},
+            topic_id=123,
+            remaining_posts=10,
+            crawl_enabled=False,
+            timings_per_topic=1,
+            plugin_manager=_PluginRecorder(events),
+            cycle_state=types.SimpleNamespace(cycle_id="cycle-1"),
+            stop_event=stop_event,
+        )
+
+        self.assertEqual(events, [])
+
+    def test_watch_emits_after_enter_and_post_fetched_for_unseen_topic_without_crawl(self) -> None:
+        client = _Client()
+        client.get_latest = lambda: {
+            "topic_list": {
+                "topics": [
+                    {"id": 123, "title": "hello", "unseen": True, "last_read_post_number": 0},
+                ]
+            }
+        }
+        events: list[tuple[str, int | None]] = []
+
+        watch(
+            client,
+            store=None,
+            interval_secs=1,
+            once=True,
+            crawl_enabled=False,
+            timings_per_topic=1,
+            plugin_manager=_PluginRecorder(events),
+        )
+
+        self.assertEqual(
+            events,
+            [
+                ("cycle.started", None),
+                ("topics.fetched", None),
+                ("topic.before_enter", None),
+                ("topic.after_enter", None),
+                ("post.fetched", 501),
+                ("topic.after_crawl", None),
+                ("cycle.finished", None),
+            ],
+        )
+
+    def test_watch_stops_at_after_enter_for_seen_topic_without_crawl(self) -> None:
+        client = _Client()
+        client.get_latest = lambda: {
+            "topic_list": {
+                "topics": [
+                    {"id": 123, "title": "hello", "unseen": False, "last_read_post_number": 0},
+                ]
+            }
+        }
+        events: list[tuple[str, int | None]] = []
+
+        watch(
+            client,
+            store=None,
+            interval_secs=1,
+            once=True,
+            crawl_enabled=False,
+            timings_per_topic=1,
+            plugin_manager=_PluginRecorder(events),
+        )
+
+        self.assertEqual(
+            events,
+            [
+                ("cycle.started", None),
+                ("topics.fetched", None),
+                ("topic.before_enter", None),
+                ("topic.after_enter", None),
+                ("cycle.finished", None),
+            ],
+        )
 
 
 if __name__ == "__main__":

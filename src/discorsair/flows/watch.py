@@ -141,6 +141,8 @@ def watch(
                             remaining,
                             crawl_enabled,
                             timings_per_topic,
+                            plugin_manager=plugin_manager,
+                            cycle_state=cycle_state,
                             stop_event=stop_event,
                         )
                         cycle_topics_entered += 1
@@ -151,15 +153,6 @@ def watch(
                         if _stop_requested(stop_event):
                             break
                         if plugin_manager is not None and cycle_state is not None:
-                            plugin_manager.dispatch("topic.after_enter", cycle_state, topic_summary=topic, topic=result.topic)
-                            for post in result.content_posts:
-                                plugin_manager.dispatch(
-                                    "post.fetched",
-                                    cycle_state,
-                                    topic_summary=topic,
-                                    topic=result.topic,
-                                    post=post,
-                                )
                             if result.content_posts:
                                 plugin_manager.dispatch(
                                     "topic.after_crawl",
@@ -210,8 +203,23 @@ def _touch_topic(
     remaining_posts: int | None,
     crawl_enabled: bool,
     timings_per_topic: int,
+    plugin_manager: PluginManager | None = None,
+    cycle_state: Any | None = None,
     stop_event: Any | None = None,
 ) -> TopicTouchResult:
+    def _dispatch_fetched_posts(posts_to_dispatch: list[dict[str, Any]]) -> None:
+        if plugin_manager is None or cycle_state is None:
+            return
+        ordered_posts = sorted(posts_to_dispatch, key=lambda post: int(post.get("post_number", 0) or 0))
+        for post in ordered_posts:
+            plugin_manager.dispatch(
+                "post.fetched",
+                cycle_state,
+                topic_summary=topic_summary,
+                topic=topic,
+                post=post,
+            )
+
     topic = client.get_topic(topic_id, track_visit=True, force_load=True)
     post_stream = topic.get("post_stream", {})
     posts = post_stream.get("posts", [])
@@ -226,6 +234,19 @@ def _touch_topic(
         fetched_post_count += len(posts)
     elif store is not None:
         store.upsert_topic_detail(topic_summary, topic)
+
+    if _stop_requested(stop_event):
+        return TopicTouchResult(
+            remaining_posts=remaining_posts,
+            topic=topic,
+            content_posts=content_posts,
+            fetched_post_count=fetched_post_count,
+        )
+
+    if plugin_manager is not None and cycle_state is not None:
+        plugin_manager.dispatch("topic.after_enter", cycle_state, topic_summary=topic_summary, topic=topic)
+    if content_posts:
+        _dispatch_fetched_posts(content_posts)
 
     _post_timings(client, store, topic_id, topic_summary, topic, timings_per_topic, stop_event=stop_event)
 
@@ -299,10 +320,14 @@ def _touch_topic(
         posts_data = data.get("post_stream", {}).get("posts", [])
         store.insert_posts(topic_id, posts_data)
         store.inc_stat("posts_fetched", len(posts_data))
-        backfill_posts.extend(posts_data)
         fetched_post_count += len(posts_data)
         if remaining_posts is not None:
             remaining_posts -= len(batch)
+        if _stop_requested(stop_event):
+            stopped_early = True
+            break
+        _dispatch_fetched_posts(posts_data)
+        backfill_posts.extend(posts_data)
     if backfill_posts:
         content_posts.extend(sorted(backfill_posts, key=lambda post: int(post.get("post_number", 0) or 0)))
     if stopped_early:

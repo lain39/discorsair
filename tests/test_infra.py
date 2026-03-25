@@ -648,6 +648,11 @@ class ControlHandlerTests(unittest.TestCase):
         self.assertEqual(status, 401)
         self.assertEqual(data, {"error": "unauthorized"})
 
+    def test_healthz_is_public_without_api_key(self) -> None:
+        (status, data), _ = self._run_handler("GET", "/healthz")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"ok": True})
+
     def test_watch_config_updates_runtime_settings(self) -> None:
         (status, data), server = self._run_handler(
             "POST",
@@ -1030,6 +1035,26 @@ class ControlServerIntegrationTests(unittest.TestCase):
             server.request_shutdown()
             thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
+        finally:
+            if thread.is_alive():
+                server.request_shutdown()
+                thread.join(timeout=2)
+            server.server_close()
+
+    def test_real_http_healthz_is_public_when_api_key_is_configured(self) -> None:
+        server = ControlServer(
+            ("127.0.0.1", 0),
+            ControlHandler,
+            _DummyClient(),
+            _DummyWatchController(),
+            api_key="secret",
+        )
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        try:
+            status, data = self._request_json(server.server_address[1], "GET", "/healthz")
+            self.assertEqual(status, 200)
+            self.assertEqual(data, {"ok": True})
         finally:
             if thread.is_alive():
                 server.request_shutdown()

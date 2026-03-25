@@ -279,6 +279,8 @@ class Plugin:
 注意：
 
 - 这是结构型 hook
+- 会在 `get_topic()` 返回后立即触发
+- 触发时机早于 `post_timings()` 和任何后续 `get_posts_by_ids()` 补拉
 - 不提供单独的 `event.posts`
 - `event.topic` 仍是完整 `get_topic()` 返回值，因此其中可能包含首屏 `post_stream.posts`
 - 不建议在这里做帖子内容处理
@@ -292,6 +294,12 @@ class Plugin:
 - `topic_summary`
 - `topic`
 - `post`
+
+触发时机：
+
+- 某条帖子对象一旦被拿到，就会立刻触发
+- `get_topic()` 首屏里的帖子会即时触发，不会等整个主题处理结束
+- `get_posts_by_ids()` 每一批补拉到的帖子，也会在该批返回后即时触发
 
 适合做：
 
@@ -307,6 +315,12 @@ class Plugin:
 - `topic_summary`
 - `topic`
 - `posts`
+
+触发时机：
+
+- 仅在本轮确实有内容型帖子参与处理时触发
+- 会在当前主题这轮内容收集结束后触发一次
+- 它晚于本轮相关的全部 `post.fetched`
 
 适合做：
 
@@ -339,10 +353,25 @@ class Plugin:
 - `topic_summary` 来自 `latest/unseen` 的主题摘要
 - `topic` 来自 `get_topic()`
 - `post` 来自 `get_topic()` 或 `get_posts_by_ids()`
+- `topic_summary.tags` / `topic.tags` 如果存在，通常是对象数组；插件要取标签名时应读 `tags[*].name`
+- `post` 的原始热度字段通常读 `reaction_users_count`
+- storage 层把 post 热度落库到 `posts.like_count`，但插件 event 看到的仍是接口原始字段
 - `event` 负载默认按只读约定使用；不要原地修改 `event.topics` / `event.topic_summary` / `event.topic` / `event.post` / `event.posts`
 - `topic_summary` 中要特别关注：
   - `unseen`
   - `last_read_post_number`
+
+## 单主题内的 hook 顺序
+
+每个主题大致按这个顺序运行：
+
+- `topic.before_enter`
+- `get_topic()`
+- `topic.after_enter`
+- `post.fetched`（首屏帖子；仅在本轮这些帖子参与内容处理时）
+- `post_timings()`
+- `post.fetched`（后续每批 `get_posts_by_ids()` 补拉到的帖子）
+- `topic.after_crawl`（仅当本轮存在内容型帖子时）
 
 ## 内容型 hook 的触发规则
 
@@ -359,6 +388,7 @@ class Plugin:
 
 - 不开数据库
 - 不补拉帖子
+- `topic.after_enter` 仍然会触发
 - 仅当 `topic_summary.unseen == true` 时触发内容型 hook
 - `post.fetched` 逐条处理 `entered_posts`
 - `topic.after_crawl.posts == entered_posts`
@@ -366,6 +396,7 @@ class Plugin:
 爬取模式：
 
 - 会开数据库
+- `topic.after_enter` 仍然会触发
 - `entered_posts` 仅在 `unseen == true` 时参与内容型 hook
 - `backfill_posts` 只要本轮实际拉到，就参与内容型 hook
 - `backfill_posts` 会先按 `post_number` 排序
@@ -673,7 +704,7 @@ class Plugin:
         post = event.post
         if not _text(post.get("cooked")):
             return
-        if int(post.get("like_count", 0) or 0) >= 20:
+        if int(post.get("reaction_users_count", 0) or 0) >= 20:
             ctx.like(post)
 
     def on_topic_after_crawl(self, ctx, event):
