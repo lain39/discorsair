@@ -389,7 +389,7 @@ class SQLiteStoreTests(unittest.TestCase):
                         "id": 10,
                         "title": "hello",
                         "slug": "hello",
-                        "tags": ["x"],
+                        "tags": [{"id": 1, "name": "x", "slug": "x"}],
                         "category_id": 9,
                         "reply_count": 7,
                         "views": 123,

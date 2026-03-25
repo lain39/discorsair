@@ -428,7 +428,14 @@ class SQLiteStore:
     def _normalize_tags(self, value: Any) -> list[str]:
         if not isinstance(value, list):
             return []
-        return [str(item) for item in value]
+        tags: list[str] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if name:
+                tags.append(name)
+        return tags
 
     def _json_dumps(self, value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -583,7 +590,7 @@ class SQLiteStore:
                     str(post.get("created_at", "") or ""),
                     str(post.get("updated_at", "") or ""),
                     now,
-                    int(post.get("like_count", 0) or 0),
+                    int(post.get("reaction_users_count", 0) or 0),
                     int(post.get("reply_count", 0) or 0),
                     int(post.get("reads", 0) or 0),
                     float(post.get("score", 0) or 0),
