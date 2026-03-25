@@ -1,7 +1,7 @@
 {
   "id": "sample_forum_ops",
   "name": "Sample Forum Ops",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "api_version": 1,
   "entry": "plugin.py",
   "hooks": [

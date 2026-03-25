@@ -186,7 +186,7 @@ docker run --rm \
 - 单独跑静态检查：`make lint`、`make static`
 - 单独跑测试：`make test`
 - 构建与包元数据校验：`make build`
-- 发布前约束校验：`make release-check TAG=v0.1.0`
+- 发布前约束校验：`make release-check TAG=v0.1.1`
 - CI 会执行：release guard、`ruff check`、`compileall`、单元测试、构建、`twine check`
 - `plugins/` 默认忽略本地自用插件，只保留 `plugins/sample_forum_ops/` 示例插件；如果你要提交自用插件，需要手动 `git add -f`
 - 如果要使用 PostgreSQL 后端，先安装可选依赖：`uv sync --extra postgres`
