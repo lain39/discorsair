@@ -61,7 +61,7 @@ CLI 命令名：`discorsair`
 - `serve` 模式下如果遇到登录失效或 unresolved challenge，会停止 watch 并把 watch 标记为 blocked；HTTP 服务继续存活
 - watch 被 `auth_invalid` / `unresolved_challenge` 阻塞后，可用 HTTP `POST /auth/cookie` 更新 `_t`，再用 `POST /watch/start` 恢复，或直接 `POST /watch/start {"force": true}` 强制重试
 - `POST /auth/cookie` / `force=true` 的设计目标是“同一账号刷新登录态”，不是“跨账号热切换”；如果要换号，建议重启进程并使用目标账号配置重新启动
-- HTTP `GET /healthz` 是公开的轻量状态端点，不受 `server.api_key` 保护；返回 `{"ok":true}`，适合做容器保活和外部探活
+- HTTP `GET /` 和 `GET /healthz` 都是公开的轻量状态端点，不受 `server.api_key` 保护；返回 `{"ok":true}`，适合做容器保活和外部探活
 - `queue.maxsize` 只限制 ready/running 的请求；已进入 `429` 冷却等待的 delayed 请求不受这个上限约束
 
 ## 容器部署
@@ -142,7 +142,9 @@ docker run --rm \
 
 说明：
 
-- 如果你传了容器命令参数，入口脚本会先启动 FlareSolverr，再执行你传入的命令
+- 如果你传了容器命令参数，入口脚本会先启动 FlareSolverr
+- 当参数看起来像 `watch` / `serve` / `run` 这类 Discorsair 子命令时，会自动执行 `discorsair --config <config-path> ...`
+- 如果你传的是完整外部命令，比如 `bash`，则按原样执行，不自动补 `discorsair`
 - 如果不挂载 `/data`，SQLite、lock 目录和运行时状态会随容器销毁一起丢失
 - 如果你想把配置直接烘进镜像，可以基于当前 `Dockerfile` 再写一层派生镜像，把你自己的 `config/app.json` 复制进去
 - `FLARESOLVERR_INTERNAL_URL` 用于告诉入口脚本去哪里探测容器内 FlareSolverr 的就绪状态，默认是 `http://127.0.0.1:8191`

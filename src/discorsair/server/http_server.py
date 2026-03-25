@@ -7,6 +7,7 @@ import ipaddress
 import logging
 import re
 import threading
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -555,14 +556,19 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _request_path(self) -> str:
+        path = urlsplit(self.path).path
+        return path or "/"
+
     def do_GET(self) -> None:  # noqa: N802
         try:
-            if self.path == "/healthz":
+            request_path = self._request_path()
+            if request_path in {"/", "/healthz"}:
                 self._send(200, self._public_status())
                 return
             if not self._require_auth():
                 return
-            if self.path == "/watch/status":
+            if request_path == "/watch/status":
                 self._send(200, self.server.watch_controller.status())
                 return
             self._send(404, {"error": "not found"})
@@ -576,15 +582,16 @@ class ControlHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            request_path = self._request_path()
             if not self._require_auth():
                 return
-            if self.path == "/watch/start":
+            if request_path == "/watch/start":
                 data = self._json()
                 use_schedule = _json_bool(data, "use_schedule", default=True)
                 force = _json_bool(data, "force", default=False)
                 self._send(200, self.server.watch_controller.start_result(use_schedule=use_schedule, force=force))
                 return
-            if self.path == "/watch/config":
+            if request_path == "/watch/config":
                 data = self._json()
                 max_posts_per_interval = _UNSET
                 if "max_posts_per_interval" in data:
@@ -598,10 +605,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
-            if self.path == "/watch/stop":
+            if request_path == "/watch/stop":
                 self._send(200, self.server.watch_controller.stop_result())
                 return
-            if self.path == "/auth/cookie":
+            if request_path == "/auth/cookie":
                 data = self._json()
                 cookie = _json_string(data, "cookie", default="")
                 updater = self.server.auth_cookie_updater
@@ -611,7 +618,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self.server.watch_controller.clear_start_blocked_reason()
                 self._send(200, {"ok": True, **(result or {})})
                 return
-            if self.path == "/like":
+            if request_path == "/like":
                 data = self._json()
                 post_id = _json_int(data, "post_id", default=0)
                 emoji = data.get("emoji", "heart")
@@ -627,7 +634,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                     self.server.on_action_success()
                 self._send(200, {"ok": True, "result": result})
                 return
-            if self.path == "/reply":
+            if request_path == "/reply":
                 data = self._json()
                 topic_id = _json_int(data, "topic_id", default=0)
                 raw = _json_string(data, "raw", default="")

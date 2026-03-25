@@ -9,6 +9,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOST=127.0.0.1 \
     PORT=8191
 
+USER root
+
 WORKDIR /app
 
 RUN apt-get update \
@@ -26,10 +28,15 @@ COPY config/app.json.template ./config/app.json.template
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && mkdir -p /app/config /data /data/locks
+    && mkdir -p /app/config /data /data/locks \
+    && chmod 0777 /app/config /data /data/locks
+
+USER flaresolverr
 
 VOLUME ["/data"]
 
 EXPOSE 17880
+
+CMD ["serve"]
 
 ENTRYPOINT ["docker-entrypoint.sh"]

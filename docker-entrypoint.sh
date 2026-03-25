@@ -3,6 +3,8 @@ set -euo pipefail
 
 APP_DIR="/app"
 DISC_BIN="${APP_DIR}/.venv/bin/discorsair"
+FLARESOLVERR_PYTHON="${FLARESOLVERR_PYTHON:-/usr/local/bin/python}"
+FLARESOLVERR_SCRIPT="${FLARESOLVERR_SCRIPT:-/app/flaresolverr.py}"
 CONFIG_PATH="${DISCORSAIR_CONFIG:-${APP_DIR}/config/app.json}"
 TEMPLATE_PATH="${APP_DIR}/config/app.json.template"
 FLARESOLVERR_URL="${FLARESOLVERR_INTERNAL_URL:-http://127.0.0.1:8191}"
@@ -12,6 +14,7 @@ STARTUP_TIMEOUT_SECS="${FLARESOLVERR_STARTUP_TIMEOUT_SECS:-60}"
 
 FS_PID=""
 APP_PID=""
+DISC_COMMANDS=("run" "watch" "daily" "like" "reply" "export" "import" "status" "notify" "init" "serve")
 
 cleanup() {
   local status=$?
@@ -45,6 +48,23 @@ wait_for_flaresolverr() {
   done
 }
 
+is_discorsair_subcommand() {
+  local arg="${1:-}"
+  if [[ -z "${arg}" ]]; then
+    return 1
+  fi
+  if [[ "${arg}" == -* ]]; then
+    return 0
+  fi
+  local command
+  for command in "${DISC_COMMANDS[@]}"; do
+    if [[ "${command}" == "${arg}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 trap cleanup EXIT INT TERM
 
 if [[ ! -x "${DISC_BIN}" ]]; then
@@ -62,13 +82,29 @@ fi
 
 mkdir -p /data /data/locks
 
-flaresolverr &
+if [[ ! -x "${FLARESOLVERR_PYTHON}" ]]; then
+  echo "flaresolverr python not found: ${FLARESOLVERR_PYTHON}" >&2
+  exit 1
+fi
+if [[ ! -f "${FLARESOLVERR_SCRIPT}" ]]; then
+  echo "flaresolverr script not found: ${FLARESOLVERR_SCRIPT}" >&2
+  exit 1
+fi
+
+"${FLARESOLVERR_PYTHON}" -u "${FLARESOLVERR_SCRIPT}" &
 FS_PID=$!
 
 wait_for_flaresolverr
 
 if (($# > 0)); then
-  "$@" &
+  if [[ "${1}" == "discorsair" ]]; then
+    shift
+    "${DISC_BIN}" --config "${CONFIG_PATH}" "$@" &
+  elif is_discorsair_subcommand "${1}"; then
+    "${DISC_BIN}" --config "${CONFIG_PATH}" "$@" &
+  else
+    "$@" &
+  fi
 else
   "${DISC_BIN}" --config "${CONFIG_PATH}" serve --host "${SERVER_HOST}" --port "${SERVER_PORT}" &
 fi
